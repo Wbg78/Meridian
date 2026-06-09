@@ -1,0 +1,13 @@
+# Netlify build + routing config for the Meridian frontend.
+# In Netlify, set the site's "Base directory" to: frontend
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Single-page-app routing: send every path to index.html so the
+# React app handles it (otherwise refreshing a tab 404s).
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
