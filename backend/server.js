@@ -131,17 +131,18 @@ const HOLDINGS = {
     { ticker: "HO",     name: "Thales",               shares: 1,   avgCost: 271.97, currency: "EUR", country: "FR", sector: "Defense" },
   ],
   etfs: [
-    { ticker: "FLXI", name: "Franklin FTSE India UCITS ETF", shares: 9, avgCost: 41.73,  currency: "EUR" },
-    { ticker: "XACT", name: "XACT OMXS30 ESG",               shares: 1, avgCost: 329.00, currency: "SEK" },
+    { ticker: "FLXI", name: "Franklin FTSE India UCITS ETF", shares: 9, avgCost: 41.73,  currency: "EUR", country: "IN", region: "Asia",   sector: "Index ETF" },
+    { ticker: "XACT", name: "XACT OMXS30 ESG",               shares: 1, avgCost: 329.00, currency: "SEK", country: "SE", region: "Europe", sector: "Index ETF" },
   ],
-  // Funds aren't on Yahoo — keep their values manual.
+  // Funds aren't on Yahoo — keep their values manual. country/region/sector
+  // are best-effort tags (from the fund's mandate) for the allocation views.
   funds: [
-    { ticker: "AMF-LANG",  name: "AMF Räntefond Lång",          value: 5172,  gainPct: 3.43 },
-    { ticker: "AVZ-GLO",   name: "Avanza Global",               value: 50191, gainPct: 18.17 },
-    { ticker: "AVZ-USA",   name: "Avanza USA",                  value: 4703,  gainPct: 49.32 },
-    { ticker: "AVZ-ZERO",  name: "Avanza Zero",                 value: 22374, gainPct: 13.40 },
-    { ticker: "PLUS-FAST", name: "PLUS Fastigheter Sverige",    value: 1309,  gainPct: -6.49 },
-    { ticker: "SWB-ASIEN", name: "Swedbank Robur Access Asien", value: 32648, gainPct: 29.56 },
+    { ticker: "AMF-LANG",  name: "AMF Räntefond Lång",          value: 5172,  gainPct: 3.43,  country: "SE",     region: "Europe", sector: "Bonds" },
+    { ticker: "AVZ-GLO",   name: "Avanza Global",               value: 50191, gainPct: 18.17, country: "Global", region: "Global", sector: "Index Fund" },
+    { ticker: "AVZ-USA",   name: "Avanza USA",                  value: 4703,  gainPct: 49.32, country: "US",     region: "North America", sector: "Index Fund" },
+    { ticker: "AVZ-ZERO",  name: "Avanza Zero",                 value: 22374, gainPct: 13.40, country: "SE",     region: "Europe", sector: "Index Fund" },
+    { ticker: "PLUS-FAST", name: "PLUS Fastigheter Sverige",    value: 1309,  gainPct: -6.49, country: "SE",     region: "Europe", sector: "Real Estate" },
+    { ticker: "SWB-ASIEN", name: "Swedbank Robur Access Asien", value: 32648, gainPct: 29.56, country: "Asia",   region: "Asia",   sector: "Index Fund" },
   ],
 };
 
@@ -520,6 +521,14 @@ async function fetchCategory(catId) {
 app.get("/api/news", requireAuth, async (req, res) => {
   try {
     const categories = Object.entries(NEWS_CATEGORIES).map(([id, c]) => ({ id, label: c.label }));
+    // Free-form query (used by Analytics drill-down: news for a country/
+    // sector/fund slice). Returns last 7 days for that search.
+    const q = (req.query.q || "").trim();
+    if (q) {
+      const articles = dedupe(await fetchGoogleNews(q, { hl: "en-US", gl: "US", ceid: "US:en" }, 7))
+        .sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 12);
+      return res.json({ categories, articles });
+    }
     const cat = req.query.category;
     if (cat && NEWS_CATEGORIES[cat]) {
       return res.json({ categories, articles: await fetchCategory(cat) });
@@ -760,18 +769,42 @@ app.get("/api/analytics", requireOwner, async (req, res) => {
     });
     const stockTotalSEK = valued.reduce((s, v) => s + v.valueSEK, 0) || 1;
 
-    // Country & sector allocation (over whole portfolio incl. funds)
+    // Build one flat list of EVERY holding (stocks + ETFs + funds) tagged
+    // with the dimensions we slice by, then compute allocations + drill-down.
     const fundsSEK = HOLDINGS.funds.reduce((s, f) => s + (f.value || 0), 0);
     const grandTotal = stockTotalSEK + fundsSEK || 1;
-    const byCountry = {}, bySector = {};
-    valued.forEach((v) => {
-      if (v.country) byCountry[v.country] = (byCountry[v.country] || 0) + v.valueSEK;
-      if (v.sector)  bySector[v.sector]  = (bySector[v.sector]  || 0) + v.valueSEK;
-    });
-    if (fundsSEK) { byCountry["Funds"] = fundsSEK; bySector["Funds/ETF"] = fundsSEK; }
-    const pct = (obj, total) => Object.fromEntries(
-      Object.entries(obj).map(([k, v]) => [k, +(v / total * 100).toFixed(1)]).sort((a, b) => b[1] - a[1])
-    );
+    const REGION = { US: "North America", CA: "North America", SE: "Europe", DK: "Europe", FR: "Europe", DE: "Europe", GB: "Europe", NO: "Europe", FI: "Europe", NL: "Europe", CH: "Europe", IN: "Asia", CN: "Asia", JP: "Asia", HK: "Asia" };
+    const regionOf = (c, fb) => REGION[c] || fb || "Other";
+
+    const priceSEK = (h) => (quotes[h.ticker]?.price ?? h.avgCost) * h.shares * (fx[h.currency] ?? 1);
+    const allHoldings = [
+      ...HOLDINGS.stocks.map((s) => ({ ticker: s.ticker, name: s.name, valueSEK: priceSEK(s), assetClass: "Stocks", sector: s.sector || "Other", country: s.country || "—", region: regionOf(s.country) })),
+      ...HOLDINGS.etfs.map((e)   => ({ ticker: e.ticker, name: e.name, valueSEK: priceSEK(e), assetClass: "ETFs",   sector: e.sector || "Index ETF", country: e.country || "—", region: e.region || regionOf(e.country, "Global") })),
+      ...HOLDINGS.funds.map((f)  => ({ ticker: f.ticker, name: f.name, valueSEK: f.value || 0,  assetClass: "Funds",  sector: f.sector || "Funds & ETFs", country: f.country || "—", region: f.region || "Global" })),
+    ];
+
+    // Group holdings by a dimension -> [{ key, valueSEK, pct, holdings:[…] }]
+    const allocate = (dim) => {
+      const groups = {};
+      allHoldings.forEach((h) => { (groups[h[dim]] ||= []).push(h); });
+      return Object.entries(groups).map(([key, hs]) => {
+        const valueSEK = hs.reduce((s, h) => s + h.valueSEK, 0);
+        return {
+          key,
+          valueSEK: Math.round(valueSEK),
+          pct: +(valueSEK / grandTotal * 100).toFixed(1),
+          holdings: hs
+            .map((h) => ({ ticker: h.ticker, name: h.name, valueSEK: Math.round(h.valueSEK), pct: +(h.valueSEK / grandTotal * 100).toFixed(1) }))
+            .sort((a, b) => b.valueSEK - a.valueSEK),
+        };
+      }).sort((a, b) => b.valueSEK - a.valueSEK);
+    };
+    const allocations = {
+      assetClass: allocate("assetClass"),
+      sector: allocate("sector"),
+      country: allocate("country"),
+      region: allocate("region"),
+    };
 
     // Sharpe / volatility from 1y daily history (aligned by date)
     let sharpe = null, volatility = null, annReturn = null;
@@ -816,8 +849,7 @@ app.get("/api/analytics", requireOwner, async (req, res) => {
       totalSEK: Math.round(grandTotal),
       stockTotalSEK: Math.round(stockTotalSEK),
       fundsSEK: Math.round(fundsSEK),
-      byCountry: pct(byCountry, grandTotal),
-      bySector: pct(bySector, grandTotal),
+      allocations,
       sharpe, volatility, annReturn, riskFree: RF * 100,
       updated: new Date().toISOString(),
     });

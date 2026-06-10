@@ -693,34 +693,90 @@ function GlossaryItem({ item }) {
   );
 }
 
-function AnalyticsView() {
-  const [section, setSection] = useState("weights");
-  const sections = ["weights","risk","geo","glossary"];
+const COUNTRY_NAME = { SE:"Sweden", US:"United States", FR:"France", DK:"Denmark", IN:"India", DE:"Germany", GB:"United Kingdom", NO:"Norway", FI:"Finland", NL:"Netherlands", CH:"Switzerland", Global:"global markets", Asia:"Asia" };
+function sliceLabel(dim, key) { return dim==="country" ? (COUNTRY_NAME[key]||key) : key; }
+function sliceNewsQuery(dim, key) {
+  if (dim==="country") return `${COUNTRY_NAME[key]||key} stock market economy`;
+  if (dim==="region")  return `${key} stock market`;
+  if (dim==="sector")  return `${key} sector stocks`;
+  return null; // asset class: news doesn't apply
+}
 
-  const stockValueSEK = MY_PORTFOLIO.stocks.reduce((s,p)=>s+toSEK(p.price*p.shares,p.currency),0);
-  const fundValue     = MY_PORTFOLIO.funds.reduce((s,f)=>s+f.value,0);
-  const etfValueSEK   = MY_PORTFOLIO.etfs.reduce((s,e)=>s+toSEK(e.price*e.shares,e.currency),0);
-  const total         = stockValueSEK + fundValue + etfValueSEK;
+// One allocation slice: click to drill into its holdings + that-week's news.
+function AllocSlice({ slice, dim, max, color, token }) {
+  const [open, setOpen] = useState(false);
+  const [showNews, setShowNews] = useState(false);
+  const [news, setNews] = useState(null);
+  const q = sliceNewsQuery(dim, slice.key);
+  useEffect(() => {
+    if (!showNews || news || !q || !token) return; let c = false;
+    fetch(`${BACKEND_URL}/api/news?q=${encodeURIComponent(q)}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : { articles: [] }).then(d => { if (!c) setNews(d.articles||[]); }).catch(() => { if (!c) setNews([]); });
+    return () => { c = true; };
+  }, [showNews]);
+  return (
+    <Card>
+      <div className="cursor-pointer" onClick={()=>setOpen(o=>!o)}>
+        <div className="flex justify-between items-center mb-2">
+          <span className="text-[var(--text)] font-bold text-sm">{sliceLabel(dim,slice.key)} <span className="text-[var(--muted)] text-xs font-normal">· {slice.holdings.length}</span></span>
+          <span className="text-[var(--text)] font-black text-sm">{slice.pct}%</span>
+        </div>
+        <Bar value={slice.pct} max={max} color={color} />
+        <div className="flex justify-between mt-1">
+          <span className="text-[var(--muted)] text-[10px]">{slice.valueSEK.toLocaleString("sv-SE")} kr</span>
+          <span className="text-violet-400 text-[10px] font-semibold">{open?"▲ hide":"▼ details"}</span>
+        </div>
+      </div>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-[var(--border)] space-y-1.5">
+          {slice.holdings.map((h,i)=>(
+            <div key={i} className="flex justify-between items-center text-xs gap-2">
+              <span className="text-[var(--text)] font-semibold w-16 flex-shrink-0">{h.ticker}</span>
+              <span className="text-[var(--muted)] truncate flex-1">{h.name}</span>
+              <span className="text-[var(--text)] font-bold">{h.pct}%</span>
+            </div>
+          ))}
+          {q && (
+            <div className="pt-1">
+              <button onClick={()=>setShowNews(s=>!s)} className="text-violet-400 text-xs font-bold">📰 {showNews?"Hide news":"Top news this week"}</button>
+              {showNews && (
+                <div className="mt-2 space-y-2">
+                  {!news && <p className="text-[var(--muted)] text-xs">Loading…</p>}
+                  {news && news.length===0 && <p className="text-[var(--muted)] text-xs">No recent news.</p>}
+                  {news && news.map((n,i)=>(
+                    <a key={i} href={n.link} target="_blank" rel="noreferrer" className="block hover:opacity-80">
+                      <p className="text-[var(--text)] text-xs leading-snug">{n.headline}</p>
+                      <p className="text-[var(--muted)] text-[10px]">{n.source}{n.time?" · "+timeAgo(n.time):""}</p>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
 
-  const positions = MY_PORTFOLIO.stocks.map(p => {
-    const val    = toSEK(p.price*p.shares,p.currency);
-    const weight = val/total;
-    const gainPct= (p.price-p.avgCost)/p.avgCost*100;
-    return { ...p, val, weight, gainPct };
-  });
-
-  const byCountry = {};
-  positions.forEach(p=>{ byCountry[p.country]=(byCountry[p.country]||0)+p.weight; });
-  byCountry["Funds+ETF"] = (fundValue+etfValueSEK)/total;
-
-  const bySector = {};
-  positions.forEach(p=>{ bySector[p.sector]=(bySector[p.sector]||0)+p.weight; });
-
-  const hhi = positions.reduce((s,p)=>s+p.weight**2,0);
-  const effN = (1/hhi).toFixed(1);
-
+function AnalyticsView({ token }) {
+  const [section, setSection] = useState("allocations");
+  const [dim, setDim] = useState("assetClass");
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    if (!token) return; let c = false; setErr(false);
+    fetch(`${BACKEND_URL}/api/analytics`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setData(d); }).catch(() => { if (!c) setErr(true); });
+    return () => { c = true; };
+  }, [token]);
+  const sections = ["allocations","risk","glossary"];
+  const dims = [["assetClass","Asset class"],["sector","Industry"],["country","Country"],["region","Region"]];
   const COLORS = ["bg-violet-500","bg-sky-500","bg-emerald-500","bg-amber-500","bg-rose-500","bg-fuchsia-500","bg-cyan-500","bg-orange-500"];
-  const TEXT_COLORS = ["text-violet-400","text-sky-400","text-emerald-400","text-amber-400","text-rose-400","text-fuchsia-400","text-cyan-400","text-orange-400"];
+  const fmtPct = (x) => x!=null ? `${x>0?"+":""}${x}%` : "—";
+
+  const alloc = data?.allocations?.[dim] || [];
+  const maxPct = Math.max(...alloc.map(a=>a.pct), 1);
 
   return (
     <div className="space-y-4">
@@ -733,115 +789,59 @@ function AnalyticsView() {
         ))}
       </div>
 
-      {section==="weights" && (
-        <div className="space-y-4">
-          <Card>
-            <SectionLabel>Allocation by asset class</SectionLabel>
-            <div className="flex h-3 rounded-full overflow-hidden gap-0.5">
-              <div className="bg-violet-500" style={{width:`${(stockValueSEK/total*100).toFixed(1)}%`}} />
-              <div className="bg-sky-500"    style={{width:`${(fundValue/total*100).toFixed(1)}%`}} />
-              <div className="bg-emerald-500"style={{width:`${(etfValueSEK/total*100).toFixed(1)}%`}} />
-            </div>
-            <div className="flex gap-4 mt-2">
-              <span className="text-violet-400 text-xs font-bold">● Stocks {(stockValueSEK/total*100).toFixed(1)}%</span>
-              <span className="text-sky-400 text-xs font-bold">● Funds {(fundValue/total*100).toFixed(1)}%</span>
-              <span className="text-emerald-400 text-xs font-bold">● ETFs {(etfValueSEK/total*100).toFixed(1)}%</span>
-            </div>
-          </Card>
+      {err && <Card><p className="text-red-400 text-sm">Couldn't load analytics. (This view is owner-only — make sure the backend is reachable.)</p></Card>}
+      {!data && !err && <Card><p className="text-[var(--muted)] text-sm">Crunching your portfolio…</p></Card>}
 
-          <SectionLabel>Stock positions by weight</SectionLabel>
-          {positions.sort((a,b)=>b.weight-a.weight).map((p,i) => (
-            <Card key={i}>
-              <div className="flex justify-between items-center mb-1.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-[var(--text)] font-bold text-sm">{p.ticker}</span>
-                  <span className="text-[var(--muted)] text-xs">{p.sector}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Pill color={p.gainPct>=0?"green":"red"} sm>{p.gainPct>=0?"+":""}{p.gainPct.toFixed(1)}%</Pill>
-                  <span className="text-[var(--text)] font-black text-sm">{(p.weight*100).toFixed(1)}%</span>
-                </div>
-              </div>
-              <Bar value={p.weight*100} max={15} color={COLORS[i%COLORS.length]} />
-              <div className="flex justify-between mt-1">
-                <span className="text-[var(--muted)] text-[10px]">{p.val.toLocaleString("sv-SE",{maximumFractionDigits:0})} kr</span>
-                <span className="text-[var(--muted)] text-[10px]">{p.country}</span>
-              </div>
-            </Card>
+      {data && section==="allocations" && (
+        <div className="space-y-3">
+          <div className="flex gap-1.5 overflow-x-auto pb-1" style={{scrollbarWidth:"none"}}>
+            {dims.map(([id,label]) => (
+              <button key={id} onClick={()=>setDim(id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all ${dim===id?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{label}</button>
+            ))}
+          </div>
+          <p className="text-[var(--muted)] text-[11px] px-1">Total {data.totalSEK?.toLocaleString("sv-SE")} kr · tap a row to see holdings &amp; news</p>
+          {alloc.map((slice,i)=>(
+            <AllocSlice key={slice.key} slice={slice} dim={dim} max={maxPct} color={COLORS[i%COLORS.length]} token={token} />
           ))}
         </div>
       )}
 
-      {section==="risk" && (
+      {data && section==="risk" && (
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <Card accent>
-              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">CAGR</p>
-              <p className="text-2xl font-black text-emerald-400">8.54%</p>
-              <p className="text-[var(--muted)] text-xs">Avanza reported</p>
+              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Ann. return (1y)</p>
+              <p className={`text-2xl font-black ${(data.annReturn??0)>=0?"text-emerald-400":"text-red-400"}`}>{fmtPct(data.annReturn)}</p>
+              <p className="text-[var(--muted)] text-xs">From daily prices</p>
             </Card>
             <Card>
-              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Std. Deviation</p>
-              <p className="text-2xl font-black text-amber-400">12.17%</p>
-              <p className="text-[var(--muted)] text-xs">Avanza reported</p>
+              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Volatility</p>
+              <p className="text-2xl font-black text-amber-400">{data.volatility!=null?data.volatility+"%":"—"}</p>
+              <p className="text-[var(--muted)] text-xs">Annualised σ</p>
             </Card>
             <Card>
-              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Sharpe Ratio</p>
-              <p className="text-2xl font-black text-red-400">0.00</p>
-              <p className="text-[var(--muted)] text-xs">Needs improvement</p>
+              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Sharpe ratio</p>
+              <p className={`text-2xl font-black ${(data.sharpe??0)>=1?"text-emerald-400":(data.sharpe??0)>=0?"text-amber-400":"text-red-400"}`}>{data.sharpe!=null?data.sharpe:"—"}</p>
+              <p className="text-[var(--muted)] text-xs">Rf {data.riskFree}%</p>
             </Card>
             <Card>
-              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Eff. Positions</p>
-              <p className="text-2xl font-black text-violet-400">{effN}</p>
-              <p className="text-[var(--muted)] text-xs">Out of {positions.length} stocks</p>
+              <p className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Holdings</p>
+              <p className="text-2xl font-black text-violet-400">{(data.allocations?.assetClass||[]).reduce((s,a)=>s+a.holdings.length,0)}</p>
+              <p className="text-[var(--muted)] text-xs">Across {(data.allocations?.assetClass||[]).length} classes</p>
             </Card>
           </div>
-
-          <Card>
-            <SectionLabel>Concentration (HHI)</SectionLabel>
-            <div className="space-y-2">
-              <div className="flex justify-between"><span className="text-[var(--muted)] text-sm">Top 3 stocks</span><span className="text-amber-400 font-bold text-sm">{(positions.sort((a,b)=>b.weight-a.weight).slice(0,3).reduce((s,p)=>s+p.weight,0)*100).toFixed(1)}%</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)] text-sm">HHI score</span><span className="text-[var(--text)] font-bold text-sm">{(hhi*100).toFixed(1)}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)] text-sm">Diversification</span><span className="text-emerald-400 font-bold text-sm">{hhi<0.25?"Good":"Concentrated"}</span></div>
-            </div>
-          </Card>
+          <Card><p className="text-[var(--muted)] text-xs leading-relaxed">Return, volatility and Sharpe are computed from the last 12 months of daily prices across your equity holdings, weighted by current value. Funds without daily price history are excluded from the risk figures (but included in allocations).</p></Card>
         </div>
       )}
 
-      {section==="geo" && (
-        <div className="space-y-3">
-          <SectionLabel>Geographic exposure (stocks only)</SectionLabel>
-          {Object.entries(byCountry).sort((a,b)=>b[1]-a[1]).map(([country,w],i) => (
-            <Card key={country}>
-              <div className="flex justify-between items-center mb-2">
-                <span className="text-[var(--text)] font-bold">{country}</span>
-                <span className="text-[var(--text)] font-black">{(w*100).toFixed(1)}%</span>
-              </div>
-              <Bar value={w*100} max={100} color={COLORS[i%COLORS.length]} />
-            </Card>
-          ))}
-
-          <SectionLabel>Sector breakdown</SectionLabel>
-          {Object.entries(bySector).sort((a,b)=>b[1]-a[1]).map(([sector,w],i) => (
-            <Card key={sector}>
-              <div className="flex justify-between items-center mb-2">
-                <span className="text-[var(--text)] text-sm">{sector}</span>
-                <span className="text-[var(--text)] font-bold text-sm">{(w*100).toFixed(1)}%</span>
-              </div>
-              <Bar value={w*100} max={30} color={COLORS[i%COLORS.length]} />
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {section==="glossary" && (
+      {data && section==="glossary" && (
         <div className="space-y-3">
           {[
-            {term:"Sharpe Ratio", val:"0.00", color:"text-red-400", exp:"Return earned per unit of risk. (Portfolio Return − Risk-Free Rate) ÷ Volatility. Your 0.00 means your returns aren't compensating for the risk taken. Target: above 1.0."},
-            {term:"Std. Deviation", val:"12.17%", color:"text-amber-400", exp:"How much your portfolio value swings. 12.17% means realistic annual swings of roughly ±12% around your average return. Lower = more predictable."},
-            {term:"CAGR", val:"8.54%", color:"text-emerald-400", exp:"Compound Annual Growth Rate — your annualised return as if it grew at a steady rate every year. S&P 500 averages ~10% long-term, so 8.54% is solid."},
-            {term:"HHI Index", val:`${(hhi*100).toFixed(1)}`, color:"text-violet-400", exp:"Herfindahl-Hirschman Index — measures concentration. Sum of squared weights. Below 25 = diversified. Your score suggests moderate concentration in a few positions."},
-            {term:"Effective N", val:`${effN} stocks`, color:"text-sky-400", exp:"Despite holding 15 stocks, your portfolio behaves like it only has this many independent bets due to correlations and concentration."},
+            {term:"Sharpe Ratio", val:data.sharpe!=null?String(data.sharpe):"—", color:(data.sharpe??0)>=1?"text-emerald-400":"text-amber-400", exp:"Return earned per unit of risk: (annual return − risk-free rate) ÷ volatility. Above 1.0 is good; below 0 means you're not being paid for the risk."},
+            {term:"Volatility", val:data.volatility!=null?data.volatility+"%":"—", color:"text-amber-400", exp:"Annualised standard deviation — how much your portfolio swings year to year. Lower = steadier. Computed from 1y of daily returns."},
+            {term:"Ann. return", val:fmtPct(data.annReturn), color:(data.annReturn??0)>=0?"text-emerald-400":"text-red-400", exp:"Annualised return implied by the last 12 months of daily price moves, value-weighted across your equities."},
+            {term:"Risk-free rate", val:data.riskFree+"%", color:"text-sky-400", exp:"The return you could get risk-free (≈ short government bonds). Used as the baseline in the Sharpe ratio."},
           ].map((item,i) => (
             <GlossaryItem key={i} item={item} />
           ))}
