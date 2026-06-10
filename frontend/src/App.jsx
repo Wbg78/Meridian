@@ -149,9 +149,9 @@ function Pill({ color, children, sm }) {
   return <span className={`font-bold rounded-full tracking-widest uppercase ${sz} ${c[color]}`}>{children}</span>;
 }
 
-function Card({ children, className = "", accent }) {
+function Card({ children, className = "", accent, onClick }) {
   return (
-    <div className={`rounded-2xl p-4 border transition-all ${accent ? "border-violet-500/30 bg-violet-500/5" : "border-[var(--border)] bg-[var(--card)]"} ${className}`}>
+    <div onClick={onClick} className={`rounded-2xl p-4 border transition-all ${accent ? "border-violet-500/30 bg-violet-500/5" : "border-[var(--border)] bg-[var(--card)]"} ${className}`}>
       {children}
     </div>
   );
@@ -371,9 +371,61 @@ function LineChart({ data, height=160 }) {
 }
 
 // Avanza-style detail panel for one stock
+// Embedded TradingView advanced chart (free widget). Full candles,
+// indicators, timeframes & drawing tools — no API key needed.
+function TVChart({ symbol, height = 380 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const container = ref.current;
+    if (!container || !symbol) return;
+    container.innerHTML = '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.async = true;
+    script.innerHTML = JSON.stringify({
+      autosize: true,
+      symbol,
+      interval: "D",
+      timezone: "Europe/Stockholm",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      hide_side_toolbar: true,
+      allow_symbol_change: false,
+      withdateranges: true,
+      support_host: "https://www.tradingview.com",
+    });
+    container.appendChild(script);
+    return () => { if (container) container.innerHTML = ""; };
+  }, [symbol]);
+  return <div className="tradingview-widget-container" ref={ref} style={{ height, width: "100%" }} />;
+}
+
+// Full-screen-ish modal that just shows a TradingView chart — used for
+// market indices/commodities/crypto/FX where there's no /api/stock page.
+function ChartModal({ tvSymbol, title, subtitle, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-[var(--bg)] border border-[var(--border)] rounded-t-3xl sm:rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+        <div className="bg-[var(--bg)] border-b border-[var(--border)] px-4 py-3 flex items-center justify-between flex-shrink-0">
+          <div>
+            <p className="text-[var(--text)] font-black text-base">{title}</p>
+            {subtitle && <p className="text-[var(--muted)] text-xs">{subtitle}</p>}
+          </div>
+          <button onClick={onClose} className="text-[var(--muted)] hover:text-[var(--text)] w-8 h-8 rounded-full border border-[var(--border)] flex items-center justify-center">✕</button>
+        </div>
+        <div className="p-2 flex-1 min-h-0">
+          <TVChart symbol={tvSymbol} height="68vh" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StockDetail({ ticker, token, onClose }) {
   const [data,setData] = useState(null);
   const [range,setRange] = useState("5y");
+  const [chartMode,setChartMode] = useState("tv");
   const [loading,setLoading] = useState(true);
   const [err,setErr] = useState(false);
   useEffect(()=>{
@@ -414,12 +466,23 @@ function StockDetail({ ticker, token, onClose }) {
                 <p className={`text-sm font-bold ${(data.change??0)>=0?"text-emerald-400":"text-red-400"}`}>{(data.change??0)>=0?"+":""}{fmtNum(data.change)}% today</p>
               </div>
               <div className="flex gap-1">
-                {["1y","5y","10y"].map(r=>(
-                  <button key={r} onClick={()=>setRange(r)} className={`text-[10px] px-2 py-1 rounded-lg font-bold ${range===r?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{r.toUpperCase()}</button>
+                {[["tv","📈 Interactive"],["line","Line"]].map(([m,lbl])=>(
+                  <button key={m} onClick={()=>setChartMode(m)} className={`text-[10px] px-2 py-1 rounded-lg font-bold whitespace-nowrap ${chartMode===m?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{lbl}</button>
                 ))}
               </div>
             </div>
-            <Card><LineChart data={data.history}/></Card>
+            {chartMode==="tv" && data.tvSymbol ? (
+              <Card className="p-0 overflow-hidden"><TVChart symbol={data.tvSymbol} height={360} /></Card>
+            ) : (
+              <>
+                <div className="flex gap-1 justify-end">
+                  {["1y","5y","10y"].map(r=>(
+                    <button key={r} onClick={()=>setRange(r)} className={`text-[10px] px-2 py-1 rounded-lg font-bold ${range===r?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{r.toUpperCase()}</button>
+                  ))}
+                </div>
+                <Card><LineChart data={data.history}/></Card>
+              </>
+            )}
             <div>
               <SectionLabel>Key ratios</SectionLabel>
               <div className="grid grid-cols-3 gap-2">
@@ -922,6 +985,7 @@ function ChangePill({ v }) {
 function MarketOverview({ token }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(false);
+  const [chart, setChart] = useState(null);
   useEffect(() => {
     if (!token) return; let c = false;
     fetch(`${BACKEND_URL}/api/market`, { headers: { Authorization: `Bearer ${token}` } })
@@ -938,7 +1002,8 @@ function MarketOverview({ token }) {
           <SectionLabel>{label}</SectionLabel>
           <div className="grid grid-cols-2 gap-2">
             {(data[key]||[]).map(m => (
-              <Card key={m.symbol}>
+              <Card key={m.symbol} className={m.tvSymbol?"cursor-pointer hover:border-violet-500/40 transition-colors":""}
+                onClick={m.tvSymbol?()=>setChart(m):undefined}>
                 <div className="flex justify-between items-center">
                   <span className="text-[var(--text)] text-sm font-bold">{m.label}</span>
                   <ChangePill v={m.change} />
@@ -949,6 +1014,7 @@ function MarketOverview({ token }) {
           </div>
         </div>
       ))}
+      {chart && <ChartModal tvSymbol={chart.tvSymbol} title={chart.label} subtitle={chart.symbol} onClose={()=>setChart(null)} />}
     </div>
   );
 }

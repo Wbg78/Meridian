@@ -16,7 +16,7 @@
 import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
-import { toYahoo, SYMBOL_MAP } from "./symbols.js";
+import { toYahoo, SYMBOL_MAP, toTradingView } from "./symbols.js";
 
 const app = express();
 app.use(express.json());
@@ -377,6 +377,7 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
         pe: f.pe ?? null, pb: f.pb ?? null, ps: f.ps ?? null, eps: f.eps ?? null,
         marketCap: f.marketCap ?? null, divYield: f.divYield ?? null,
         week52High: q.week52High ?? null, week52Low: q.week52Low ?? null,
+        tvSymbol: toTradingView(s.ticker),
       };
     });
     const etfs = HOLDINGS.etfs.map((e) => {
@@ -387,6 +388,7 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
         price,
         change: q.change ?? null,
         gainPct: price != null ? ((price - e.avgCost) / e.avgCost) * 100 : null,
+        tvSymbol: toTradingView(e.ticker),
       };
     });
 
@@ -596,18 +598,19 @@ app.get("/api/screener", requireAuth, async (req, res) => {
 });
 
 // Market overview — indices, commodities, crypto (batched, one request).
+// Each entry: [yahooSymbol, label, tradingViewSymbol]
 const MARKET_GROUPS = {
-  indices: [["^GSPC", "S&P 500"], ["^IXIC", "Nasdaq"], ["^DJI", "Dow Jones"], ["^OMX", "OMXS30"], ["^GDAXI", "DAX"], ["^FTSE", "FTSE 100"], ["^VIX", "VIX"]],
-  commodities: [["GC=F", "Gold"], ["CL=F", "Crude Oil"], ["BZ=F", "Brent"], ["SI=F", "Silver"], ["NG=F", "Nat Gas"], ["HG=F", "Copper"]],
-  crypto: [["BTC-USD", "Bitcoin"], ["ETH-USD", "Ethereum"]],
-  fx: [["USDSEK=X", "USD/SEK"], ["EURSEK=X", "EUR/SEK"]],
+  indices: [["^GSPC", "S&P 500", "SP:SPX"], ["^IXIC", "Nasdaq", "NASDAQ:IXIC"], ["^DJI", "Dow Jones", "DJ:DJI"], ["^OMX", "OMXS30", "OMXSTO:OMXS30"], ["^GDAXI", "DAX", "XETR:DAX"], ["^FTSE", "FTSE 100", "TVC:UKX"], ["^VIX", "VIX", "TVC:VIX"]],
+  commodities: [["GC=F", "Gold", "TVC:GOLD"], ["CL=F", "Crude Oil", "TVC:USOIL"], ["BZ=F", "Brent", "TVC:UKOIL"], ["SI=F", "Silver", "TVC:SILVER"], ["NG=F", "Nat Gas", "NYMEX:NG1!"], ["HG=F", "Copper", "COMEX:HG1!"]],
+  crypto: [["BTC-USD", "Bitcoin", "BINANCE:BTCUSDT"], ["ETH-USD", "Ethereum", "BINANCE:ETHUSDT"]],
+  fx: [["USDSEK=X", "USD/SEK", "FX:USDSEK"], ["EURSEK=X", "EUR/SEK", "FX:EURSEK"]],
 };
 app.get("/api/market", requireAuth, async (req, res) => {
   try {
     const all = Object.values(MARKET_GROUPS).flat().map((x) => x[0]);
     const q = await fetchQuotes(all);
-    const build = (list) => list.map(([sym, label]) => ({
-      symbol: sym, label, price: q[sym]?.price ?? null,
+    const build = (list) => list.map(([sym, label, tv]) => ({
+      symbol: sym, label, tvSymbol: tv, price: q[sym]?.price ?? null,
       change: q[sym]?.change ?? null, currency: q[sym]?.currency ?? null,
     }));
     res.json(Object.fromEntries(Object.entries(MARKET_GROUPS).map(([k, v]) => [k, build(v)])));
@@ -684,6 +687,7 @@ app.get("/api/stock/:ticker", requireAuth, async (req, res) => {
 
     res.json({
       ticker,
+      tvSymbol: toTradingView(ticker),
       name: pr.longName || pr.shortName || m.longName || m.shortName || ticker,
       currency: m.currency || pr.currency || null,
       price,

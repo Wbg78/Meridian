@@ -33,3 +33,25 @@ export const REVERSE_MAP = Object.fromEntries(
 export function toYahoo(ticker) {
   return SYMBOL_MAP[ticker] || ticker;
 }
+
+// Maps our tickers to TradingView symbols (EXCHANGE:SYMBOL) for the
+// embedded chart widget. Known holdings are pinned; anything else is
+// derived from the Yahoo symbol's exchange suffix.
+export const TV_MAP = {
+  GOOGL: "NASDAQ:GOOGL", BX: "NYSE:BX", BXMT: "NYSE:BXMT", DUOL: "NASDAQ:DUOL",
+  FLYE: "NASDAQ:FLYE", HIMS: "NYSE:HIMS", LMND: "NYSE:LMND", PLTR: "NASDAQ:PLTR", ROOT: "NASDAQ:ROOT",
+  "BETS-B": "OMXSTO:BETS_B", FLAT: "OMXSTO:FLAT_B", "INVE-B": "OMXSTO:INVE_B",
+  "NIBE-B": "OMXSTO:NIBE_B", NVO: "OMXCOP:NOVO_B", HO: "EURONEXT:HO",
+  FLXI: "XETR:FLXI", XACT: "OMXSTO:XACTOMXS30ESG",
+};
+
+export function toTradingView(ticker) {
+  if (TV_MAP[ticker]) return TV_MAP[ticker];
+  const y = toYahoo(ticker);
+  const base = (suffix, exch) => exch + ":" + y.slice(0, -suffix.length).replace(/-/g, "_");
+  if (y.endsWith(".ST")) return base(".ST", "OMXSTO");
+  if (y.endsWith(".CO")) return base(".CO", "OMXCOP");
+  if (y.endsWith(".PA")) return base(".PA", "EURONEXT");
+  if (y.endsWith(".DE")) return base(".DE", "XETR");
+  return ticker.replace(/-/g, "."); // US listings: TradingView resolves the bare symbol
+}
