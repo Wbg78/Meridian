@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: meridian-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: ACCESS_CODE
+        value: TSLA5574
+      - key: ALLOWED_ORIGINS
+        value: https://williamgrip.se,https://www.williamgrip.se,https://meridian-grip.netlify.app
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
