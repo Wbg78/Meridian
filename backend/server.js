@@ -16,15 +16,7 @@
 import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
-import YF from "yahoo-finance2";
 import { toYahoo, SYMBOL_MAP } from "./symbols.js";
-
-// Normalise across yahoo-finance2 build shapes so `yahooFinance.quote(...)`
-// always resolves to the object that actually has the methods.
-const yahooFinance =
-  (YF && typeof YF.quote === "function") ? YF :
-  (YF?.default && typeof YF.default.quote === "function") ? YF.default :
-  (typeof YF === "function" ? new YF() : YF);
 
 const app = express();
 app.use(express.json());
@@ -155,31 +147,91 @@ const HOLDINGS = {
 
 // ─── helpers ────────────────────────────────────────────────────
 
-// Fetch live quotes for a list of *your* tickers. Returns a map
-// keyed by your ticker -> { price, change, currency, ... }
-function mapQuote(q, fallbackName) {
+// Yahoo's public v8 chart endpoint needs NO API key and NO "crumb"
+// cookie, so (unlike the quote endpoint) it isn't blocked from cloud
+// server IPs — and it covers every exchange we hold (US, Stockholm,
+// Copenhagen, Paris, Xetra). This is the backbone of all live prices.
+const YH = "https://query1.finance.yahoo.com";
+// Minimal headers — a plain User-Agent is what Yahoo's v8 chart wants.
+// (Adding Accept/extra headers makes it more likely to 429.)
+const YH_HEADERS = { "User-Agent": "Mozilla/5.0" };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// GET a Yahoo URL as JSON, retrying a couple of times on 429 (rate limit).
+async function yahooFetch(url, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    const r = await fetch(url, { headers: YH_HEADERS });
+    if (r.status === 429 && i < tries - 1) { await sleep(300 * (i + 1)); continue; }
+    if (!r.ok) throw new Error("yahoo chart " + r.status);
+    return r.json();
+  }
+  throw new Error("yahoo chart 429");
+}
+
+// Run async tasks with a concurrency cap so we don't burst Yahoo.
+async function pooled(items, limit, fn) {
+  const ret = new Array(items.length);
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      ret[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return ret;
+}
+
+// Fetch the chart "meta" block (price, currency, prev close, 52wk) for
+// ONE Yahoo symbol. Throws if the symbol returns no price.
+async function yahooMeta(yahooSym) {
+  const j = await yahooFetch(`${YH}/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1d&range=1d`);
+  const m = j?.chart?.result?.[0]?.meta;
+  if (!m || m.regularMarketPrice == null) throw new Error("no data");
+  return m;
+}
+
+// Daily/weekly close history for ONE Yahoo symbol over a Yahoo range
+// string (1y, 2y, 5y, 10y, max). Uses adjusted close when available.
+async function yahooHistory(yahooSym, { range = "1y", interval = "1d" } = {}) {
+  const j = await yahooFetch(`${YH}/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=${interval}&range=${range}`);
+  const res = j?.chart?.result?.[0];
+  if (!res) throw new Error("no data");
+  const ts = res.timestamp || [];
+  const closes = res.indicators?.quote?.[0]?.close || [];
+  const adj = res.indicators?.adjclose?.[0]?.adjclose;
+  const out = [];
+  for (let i = 0; i < ts.length; i++) {
+    const c = (adj && adj[i] != null) ? adj[i] : closes[i];
+    if (c != null) out.push({ t: new Date(ts[i] * 1000), c });
+  }
+  return out;
+}
+
+// Map chart meta -> our quote shape. Change % is derived from the
+// previous close. (PE/marketCap/divYield aren't in the chart meta;
+// the stock-detail route enriches those separately.)
+function metaToQuote(m, fallbackName) {
+  const price = m.regularMarketPrice ?? null;
+  const prev = m.chartPreviousClose ?? m.previousClose ?? null;
+  const change = (price != null && prev) ? ((price - prev) / prev) * 100 : null;
   return {
-    price: q.regularMarketPrice ?? null,
-    change: q.regularMarketChangePercent ?? null,
-    currency: q.currency ?? null,
-    name: q.shortName ?? q.longName ?? fallbackName,
-    marketState: q.marketState ?? null,
-    pe: q.trailingPE ?? null,
-    forwardPe: q.forwardPE ?? null,
-    pb: q.priceToBook ?? null,
-    eps: q.epsTrailingTwelveMonths ?? null,
-    marketCap: q.marketCap ?? null,
-    divYield: q.trailingAnnualDividendYield != null ? q.trailingAnnualDividendYield * 100 : (q.dividendYield ?? null),
-    week52High: q.fiftyTwoWeekHigh ?? null,
-    week52Low: q.fiftyTwoWeekLow ?? null,
+    price,
+    change,
+    currency: m.currency ?? null,
+    name: m.shortName || m.longName || fallbackName,
+    week52High: m.fiftyTwoWeekHigh ?? null,
+    week52Low: m.fiftyTwoWeekLow ?? null,
   };
 }
 
-// Cache so we don't hammer Yahoo (which returns 429 "Too Many Requests").
+// Cache so we don't hammer Yahoo on every page load.
 const _quoteCache = new Map(); // ticker -> { at, data }
 const QUOTE_TTL = 60_000;
 
-// Fetch live quotes for your tickers in ONE batched request (not 15).
+// Live quotes for a list of *our* tickers (mapped to Yahoo symbols).
+// Fetched in parallel via the keyless v8 chart endpoint, cached 60s.
 async function fetchQuotes(tickers) {
   const now = Date.now();
   const out = {};
@@ -191,23 +243,17 @@ async function fetchQuotes(tickers) {
   }
   if (need.length === 0) return out;
 
-  const yahooSymbols = need.map(toYahoo);
-  try {
-    // Single request for all symbols at once.
-    const results = await yahooFinance.quote(yahooSymbols, {}, { validateResult: false });
-    const arr = Array.isArray(results) ? results : [results];
-    const bySym = {};
-    arr.forEach((q) => { if (q && q.symbol) bySym[String(q.symbol).toUpperCase()] = q; });
-    need.forEach((t, i) => {
-      const q = bySym[yahooSymbols[i].toUpperCase()];
-      const data = q ? mapQuote(q, t) : { price: null, change: null, error: "no data" };
+  // Cap concurrency at 4 so a big portfolio doesn't burst Yahoo's limit.
+  await pooled(need, 4, async (t) => {
+    try {
+      const m = await yahooMeta(toYahoo(t));
+      const data = metaToQuote(m, t);
       out[t] = data;
-      if (q) _quoteCache.set(t, { at: now, data });
-    });
-  } catch (e) {
-    const msg = String(e.message || e);
-    need.forEach((t) => { out[t] = { price: null, change: null, error: msg }; });
-  }
+      _quoteCache.set(t, { at: now, data });
+    } catch (e) {
+      out[t] = { price: null, change: null, error: String(e.message || e) };
+    }
+  });
   return out;
 }
 
@@ -408,63 +454,65 @@ app.get("/api/news", requireAuth, async (req, res) => {
   }
 });
 
-// Capitol Trades — politician disclosures (public BFF JSON API)
+// Congressional trades — US Senate + House STOCK Act disclosures, via
+// Financial Modeling Prep's free /stable API (key-based, server-friendly).
 app.get("/api/capitol", requireAuth, async (req, res) => {
+  const key = process.env.FMP_API_KEY;
+  if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
   try {
-    const url =
-      "https://bff.capitoltrades.com/trades?per_page=20&page=1&sortBy=-txDate";
-    const r = await fetch(url, { headers: {
-      accept: "application/json",
-      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      "accept-language": "en-US,en;q=0.9",
-      referer: "https://www.capitoltrades.com/",
-      origin: "https://www.capitoltrades.com",
-    } });
-    if (!r.ok) throw new Error("capitoltrades " + r.status);
-    const json = await r.json();
-    const feed = (json.data || []).map((t) => ({
-      name: t.politician?.fullName || "Unknown",
-      party: (t.politician?.party || "").charAt(0).toUpperCase(),
-      ticker: t.asset?.assetTicker || t.issuer?.issuerTicker || "—",
-      action: (t.txType || "").toUpperCase(),
-      amount: t.value || t.size || "—",
-      date: t.txDate,
+    const [sen, house] = await Promise.allSettled([
+      fetch(`https://financialmodelingprep.com/stable/senate-latest?apikey=${key}`).then((r) => r.json()),
+      fetch(`https://financialmodelingprep.com/stable/house-latest?apikey=${key}`).then((r) => r.json()),
+    ]);
+    const norm = (arr, chamber) => (Array.isArray(arr) ? arr : []).map((t) => ({
+      name: `${t.firstName || ""} ${t.lastName || ""}`.trim() || t.office || "Unknown",
+      chamber,
+      party: "",   // FMP doesn't expose party; frontend falls back to chamber.
+      ticker: t.symbol || "—",
+      action: /sale|sold/i.test(t.type || "") ? "SELL"
+            : /purchase|buy/i.test(t.type || "") ? "BUY"
+            : (t.type || "—"),
+      amount: t.amount || "—",
+      date: t.transactionDate || t.disclosureDate || null,
+      asset: t.assetDescription || "",
     }));
+    const feed = [
+      ...(sen.status === "fulfilled" ? norm(sen.value, "Senate") : []),
+      ...(house.status === "fulfilled" ? norm(house.value, "House") : []),
+    ]
+      .filter((x) => x.date)
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(0, 30);
+    if (!feed.length) throw new Error("no disclosures returned");
     res.json(feed);
   } catch (e) {
-    res.status(502).json({ error: "Capitol Trades unavailable: " + String(e) });
+    res.status(502).json({ error: "Congress trades unavailable: " + String(e) });
   }
 });
 
-// Finviz screener — top gainers (lightweight HTML scrape)
-// Top movers from Finviz, enriched with live prices.
+// Screener — top movers from Financial Modeling Prep (free /stable API).
+// Key-based, so it works from any server IP (unlike Finviz scraping).
 //   ?view=topgainers (default) | losers | mostactive
 app.get("/api/screener", requireAuth, async (req, res) => {
+  const key = process.env.FMP_API_KEY;
+  if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
   try {
-    const map = { topgainers: "ta_topgainers", losers: "ta_toplosers", mostactive: "ta_mostactive" };
-    const signal = map[req.query.view] || "ta_topgainers";
-    const url = `https://finviz.com/screener.ashx?v=111&s=${signal}`;
-    const r = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-    if (!r.ok) throw new Error("finviz " + r.status);
-    const html = await r.text();
-    // Match ticker links directly (robust to CSS class changes).
-    const tickers = [...new Set(
-      [...html.matchAll(/quote\.ashx\?t=([A-Za-z.\-]+)/g)].map((m) => m[1].toUpperCase())
-    )].slice(0, 15);
-    const q = await fetchQuotes(tickers);
-    const rows = tickers.map((t) => ({
-      ticker: t, price: q[t]?.price ?? null, change: q[t]?.change ?? null,
-      name: q[t]?.name ?? t, marketCap: q[t]?.marketCap ?? null, pe: q[t]?.pe ?? null,
+    const map = { topgainers: "biggest-gainers", losers: "biggest-losers", mostactive: "most-actives" };
+    const endpoint = map[req.query.view] || "biggest-gainers";
+    const r = await fetch(`https://financialmodelingprep.com/stable/${endpoint}?apikey=${key}`);
+    if (!r.ok) throw new Error("fmp " + r.status);
+    const data = await r.json();
+    if (!Array.isArray(data)) throw new Error(data?.["Error Message"] || "unexpected response");
+    const rows = data.slice(0, 20).map((d) => ({
+      ticker: d.symbol,
+      name: d.name || d.symbol,
+      price: d.price ?? null,
+      change: d.changesPercentage ?? null,   // already a percent
+      exchange: d.exchange || null,
     }));
-    res.json({ rows, source: "finviz" });
+    res.json({ rows, source: "financialmodelingprep" });
   } catch (e) {
-    res.status(502).json({ error: "Finviz unavailable: " + String(e) });
+    res.status(502).json({ error: "Screener unavailable: " + String(e) });
   }
 });
 
@@ -494,8 +542,10 @@ app.get("/api/search", requireAuth, async (req, res) => {
   try {
     const qstr = (req.query.q || "").trim();
     if (!qstr) return res.json([]);
-    const r = await yahooFinance.search(qstr, { quotesCount: 8, newsCount: 0 }, { validateResult: false });
-    const out = (r.quotes || []).filter((x) => x.symbol).map((x) => ({
+    const r = await fetch(`${YH}/v1/finance/search?q=${encodeURIComponent(qstr)}&quotesCount=8&newsCount=0`, { headers: YH_HEADERS });
+    if (!r.ok) throw new Error("yahoo search " + r.status);
+    const j = await r.json();
+    const out = (j.quotes || []).filter((x) => x.symbol).map((x) => ({
       symbol: x.symbol, name: x.shortname || x.longname || x.symbol,
       exchange: x.exchDisp || x.exchange || "", type: x.quoteType || "",
     }));
@@ -511,76 +561,77 @@ app.get("/api/stock/:ticker", requireAuth, async (req, res) => {
   try {
     const ticker = req.params.ticker;
     const sym = toYahoo(ticker);
-    const rangeYears = ({ "1y": 1, "3y": 3, "5y": 5, "10y": 10 }[req.query.range]) || 5;
+    const rangeMap = {
+      "1y":  { range: "1y",  interval: "1d"  },
+      "3y":  { range: "5y",  interval: "1wk" },
+      "5y":  { range: "5y",  interval: "1wk" },
+      "10y": { range: "10y", interval: "1wk" },
+    };
+    const rg = rangeMap[req.query.range] || rangeMap["5y"];
 
-    const [summary, chart] = await Promise.allSettled([
-      yahooFinance.quoteSummary(sym, {
-        modules: [
-          "price", "summaryDetail", "defaultKeyStatistics", "financialData",
-          "calendarEvents", "summaryProfile", "institutionOwnership",
-        ],
-      }),
-      yahooFinance.chart(sym, {
-        period1: new Date(Date.now() - rangeYears * 365 * 24 * 60 * 60 * 1000),
-        interval: rangeYears <= 1 ? "1d" : "1wk",
-      }),
+    // Price/52wk/history come from Yahoo (covers every exchange).
+    // Fundamentals come from FMP (US coverage on the free tier — non-US
+    // simply returns null, so the page degrades gracefully).
+    const fmpKey = process.env.FMP_API_KEY;
+    const fmpGet = async (path) => {
+      if (!fmpKey) return null;
+      try {
+        const r = await fetch(`https://financialmodelingprep.com/stable/${path}&apikey=${fmpKey}`);
+        if (!r.ok) return null;
+        const d = await r.json();
+        return Array.isArray(d) ? (d[0] || null) : d;
+      } catch { return null; }
+    };
+
+    const [metaR, histR, profileR, ratiosR] = await Promise.allSettled([
+      yahooMeta(sym),
+      yahooHistory(sym, rg),
+      fmpGet(`profile?symbol=${encodeURIComponent(ticker)}`),
+      fmpGet(`ratios-ttm?symbol=${encodeURIComponent(ticker)}`),
     ]);
 
-    const s = summary.status === "fulfilled" ? summary.value : {};
-    const sd = s.summaryDetail || {};
-    const ks = s.defaultKeyStatistics || {};
-    const fd = s.financialData || {};
-    const pr = s.price || {};
-    const prof = s.summaryProfile || {};
-    const cal = s.calendarEvents || {};
+    const m    = metaR.status === "fulfilled" ? metaR.value : {};
+    const hist = histR.status === "fulfilled" ? histR.value : [];
+    const prof = profileR.status === "fulfilled" ? (profileR.value || {}) : {};
+    const rat  = ratiosR.status === "fulfilled" ? (ratiosR.value || {}) : {};
 
-    const history = chart.status === "fulfilled"
-      ? (chart.value.quotes || [])
-          .filter((q) => q.close != null)
-          .map((q) => ({ t: q.date, c: q.close }))
-      : [];
-
-    const owners = (s.institutionOwnership?.ownershipList || []).slice(0, 8).map((o) => ({
-      organization: o.organization,
-      pctHeld: o.pctHeld != null ? o.pctHeld * 100 : null,
-      value: o.value ?? null,
-      reportDate: o.reportDate ?? null,
-    }));
-
-    const earningsDates = cal.earnings?.earningsDate || [];
+    const price = m.regularMarketPrice ?? prof.price ?? null;
+    const prev  = m.chartPreviousClose ?? m.previousClose ?? null;
+    const change = (price != null && prev) ? ((price - prev) / prev) * 100 : (prof.changePercentage ?? null);
+    const asPct = (x) => (x != null ? x * 100 : null);
 
     res.json({
       ticker,
-      name: pr.longName || pr.shortName || ticker,
-      currency: pr.currency || sd.currency || null,
-      price: pr.regularMarketPrice ?? null,
-      change: pr.regularMarketChangePercent != null ? pr.regularMarketChangePercent * 100 : null,
+      name: m.longName || m.shortName || prof.companyName || ticker,
+      currency: m.currency || prof.currency || null,
+      price,
+      change,
       sector: prof.sector || null,
       industry: prof.industry || null,
       country: prof.country || null,
       website: prof.website || null,
-      summary: prof.longBusinessSummary || null,
+      summary: prof.description || null,
       stats: {
-        peTrailing: sd.trailingPE ?? null,
-        peForward: ks.forwardPE ?? sd.forwardPE ?? null,
-        ps: sd.priceToSalesTrailing12Months ?? null,
-        pb: ks.priceToBook ?? null,
-        eps: ks.trailingEps ?? null,
-        marketCap: sd.marketCap ?? pr.marketCap ?? null,
-        beta: sd.beta ?? ks.beta ?? null,
-        dividendYield: sd.dividendYield != null ? sd.dividendYield * 100 : null,
-        profitMargin: fd.profitMargins != null ? fd.profitMargins * 100 : null,
-        revenueGrowth: fd.revenueGrowth != null ? fd.revenueGrowth * 100 : null,
-        roe: fd.returnOnEquity != null ? fd.returnOnEquity * 100 : null,
-        week52High: sd.fiftyTwoWeekHigh ?? null,
-        week52Low: sd.fiftyTwoWeekLow ?? null,
-        recommendation: fd.recommendationKey ?? null,
+        peTrailing: rat.priceToEarningsRatioTTM ?? null,
+        peForward: null,
+        ps: rat.priceToSalesRatioTTM ?? null,
+        pb: rat.priceToBookRatioTTM ?? null,
+        eps: rat.netIncomePerShareTTM ?? null,
+        marketCap: prof.marketCap ?? null,
+        beta: prof.beta ?? null,
+        dividendYield: asPct(rat.dividendYieldTTM),
+        profitMargin: asPct(rat.netProfitMarginTTM),
+        revenueGrowth: null,
+        roe: null,
+        week52High: m.fiftyTwoWeekHigh ?? null,
+        week52Low: m.fiftyTwoWeekLow ?? null,
+        recommendation: null,
       },
-      nextEarnings: earningsDates[0] ?? null,
-      exDividend: cal.exDividendDate ?? null,
-      dividendDate: cal.dividendDate ?? null,
-      owners,
-      history,
+      nextEarnings: null,
+      exDividend: null,
+      dividendDate: null,
+      owners: [],
+      history: hist.map((p) => ({ t: p.t, c: p.c })),
     });
   } catch (e) {
     res.status(502).json({ error: "Stock detail unavailable: " + String(e) });
@@ -595,7 +646,7 @@ async function fxToSEK() {
   const pairs = { USD: "USDSEK=X", EUR: "EURSEK=X", DKK: "DKKSEK=X" };
   await Promise.allSettled(
     Object.entries(pairs).map(async ([cur, sym]) => {
-      try { const q = await yahooFinance.quote(sym); rates[cur] = q.regularMarketPrice; } catch { /* leave undefined */ }
+      try { const m = await yahooMeta(sym); rates[cur] = m.regularMarketPrice; } catch { /* leave undefined */ }
     })
   );
   _fxCache = { at: Date.now(), rates };
@@ -639,15 +690,14 @@ app.get("/api/analytics", requireOwner, async (req, res) => {
     // Sharpe / volatility from 1y daily history (aligned by date)
     let sharpe = null, volatility = null, annReturn = null;
     try {
-      const since = new Date(Date.now() - 370 * 24 * 60 * 60 * 1000);
-      const charts = await Promise.allSettled(
-        valued.map((v) => yahooFinance.chart(toYahoo(v.ticker), { period1: since, interval: "1d" }))
+      const charts = await pooled(valued, 4, (v) =>
+        yahooHistory(toYahoo(v.ticker), { range: "1y", interval: "1d" }).catch(() => null)
       );
       const series = {}; // ticker -> Map(dateStr -> close)
-      charts.forEach((c, i) => {
-        if (c.status === "fulfilled") {
+      charts.forEach((arr, i) => {
+        if (arr) {
           const m = new Map();
-          (c.value.quotes || []).forEach((q) => { if (q.close != null) m.set(new Date(q.date).toISOString().slice(0, 10), q.close); });
+          arr.forEach((p) => { if (p.c != null) m.set(new Date(p.t).toISOString().slice(0, 10), p.c); });
           series[valued[i].ticker] = m;
         }
       });

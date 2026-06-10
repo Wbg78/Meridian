@@ -1010,7 +1010,7 @@ function Movers({ token, onOpen }) {
             className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${view===id?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{label}</button>
         ))}
       </div>
-      {err && <Card><p className="text-red-400 text-sm">Couldn't load movers (Finviz/Yahoo may be busy — try again).</p></Card>}
+      {err && <Card><p className="text-red-400 text-sm">Couldn't load movers — try again in a moment.</p></Card>}
       {!rows && !err && <Card><p className="text-[var(--muted)] text-sm">Loading movers…</p></Card>}
       <div className="space-y-2">
         {(rows||[]).map((s,i) => (
@@ -1064,10 +1064,10 @@ function CapitolView() {
       {CAPITOL_FEED.map((c,i) => (
         <Card key={i}>
           <div className="flex items-center gap-3">
-            <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0 ${c.party==="D"?"bg-sky-500/15 text-sky-400":"bg-red-500/15 text-red-400"}`}>{c.party}</div>
+            <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0 ${c.party==="D"?"bg-sky-500/15 text-sky-400":c.party==="R"?"bg-red-500/15 text-red-400":"bg-violet-500/15 text-violet-400"}`}>{c.party || (c.chamber||"·")[0]}</div>
             <div className="flex-1 min-w-0">
-              <p className="text-[var(--text)] text-sm font-semibold">{c.name}</p>
-              <p className="text-[var(--muted)] text-xs">{c.ticker} · {c.amount} · {c.date}</p>
+              <p className="text-[var(--text)] text-sm font-semibold truncate">{c.name}{c.chamber?<span className="text-[var(--muted)] font-normal"> · {c.chamber}</span>:null}</p>
+              <p className="text-[var(--muted)] text-xs truncate">{c.ticker} · {c.amount} · {c.date}</p>
             </div>
             <Pill color={c.action==="BUY"?"green":"red"} sm>{c.action}</Pill>
           </div>

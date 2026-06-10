@@ -9,7 +9,7 @@ export const SYMBOL_MAP = {
   BX: "BX",
   BXMT: "BXMT",
   DUOL: "DUOL",
-  FLAT: "FLAT.ST",         // Flat Capital (Stockholm)
+  FLAT: "FLAT-B.ST",       // Flat Capital B (Stockholm)
   FLYE: "FLYE",
   HIMS: "HIMS",
   "INVE-B": "INVE-B.ST",   // Investor B (Stockholm)
@@ -21,8 +21,8 @@ export const SYMBOL_MAP = {
   HO: "HO.PA",             // Thales (Paris)
 
   // --- ETFs ---
-  FLXI: "FLXI.DE",         // Franklin FTSE India UCITS ETF (Xetra) — adjust if needed
-  XACT: "XACTOMXS30ESG.ST" // XACT OMXS30 ESG (Stockholm) — adjust if needed
+  FLXI: "FLXI.DE",         // Franklin FTSE India UCITS ETF (Xetra)
+  XACT: "XACT-OMXS30.ST"   // XACT OMXS30 ESG (Stockholm)
 };
 
 // Reverse lookup: Yahoo symbol -> your ticker
