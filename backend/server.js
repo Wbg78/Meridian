@@ -257,6 +257,81 @@ async function fetchQuotes(tickers) {
   return out;
 }
 
+// ── Yahoo fundamentals via the crumb-authenticated quoteSummary API ──
+// Unlike the chart endpoint, quoteSummary carries P/E, P/B, P/S, EPS,
+// dividend yield, market cap, margins, etc. — for EVERY exchange we
+// hold (US + Nordic + EU), for free. It needs a cookie + "crumb"; we
+// fetch those ONCE and cache them (~25 min) so we don't trip the rate
+// limiter that blocked the old library.
+let _yc = { cookie: null, crumb: null, at: 0 };
+const YC_TTL = 25 * 60_000;
+
+async function getYahooCreds(force = false) {
+  if (!force && _yc.crumb && Date.now() - _yc.at < YC_TTL) return _yc;
+  const cr = await fetch("https://fc.yahoo.com", { headers: YH_HEADERS });
+  const setCookies = typeof cr.headers.getSetCookie === "function" ? cr.headers.getSetCookie() : [];
+  const cookie = setCookies.map((c) => c.split(";")[0]).join("; ");
+  const crumbRes = await fetch(`${YH}/v1/test/getcrumb`, { headers: { ...YH_HEADERS, Cookie: cookie } });
+  const crumb = (await crumbRes.text()).trim();
+  if (!crumb || crumb.includes("<") || crumb.length > 30) throw new Error("no crumb");
+  _yc = { cookie, crumb, at: Date.now() };
+  return _yc;
+}
+
+// Fetch quoteSummary modules for ONE symbol, refreshing creds once on 401/429.
+async function yahooQuoteSummary(yahooSym, modules) {
+  const mod = modules.join(",");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const creds = await getYahooCreds(attempt > 0);
+    const url = `${YH}/v10/finance/quoteSummary/${encodeURIComponent(yahooSym)}?modules=${mod}&crumb=${encodeURIComponent(creds.crumb)}`;
+    const r = await fetch(url, { headers: { ...YH_HEADERS, Cookie: creds.cookie } });
+    if ((r.status === 401 || r.status === 429) && attempt === 0) continue;
+    if (!r.ok) throw new Error("quoteSummary " + r.status);
+    const res = (await r.json())?.quoteSummary?.result?.[0];
+    if (!res) throw new Error("no data");
+    return res;
+  }
+  throw new Error("quoteSummary failed");
+}
+
+// Yahoo wraps numbers as { raw, fmt }; pull the raw value.
+const rawNum = (x) => (x && typeof x === "object" ? (x.raw ?? null) : (x ?? null));
+
+// Fundamentals for our tickers, cached 6h (they barely move intraday).
+const _fundCache = new Map(); // ticker -> { at, data }
+const FUND_TTL = 6 * 3600_000;
+
+async function yahooFundamentals(tickers) {
+  const out = {};
+  const now = Date.now();
+  const need = [];
+  for (const t of tickers) {
+    const c = _fundCache.get(t);
+    if (c && now - c.at < FUND_TTL) out[t] = c.data;
+    else need.push(t);
+  }
+  await pooled(need, 3, async (t) => {
+    try {
+      const res = await yahooQuoteSummary(toYahoo(t), ["summaryDetail", "defaultKeyStatistics", "price"]);
+      const sd = res.summaryDetail || {}, ks = res.defaultKeyStatistics || {}, pr = res.price || {};
+      const dy = rawNum(sd.dividendYield) ?? rawNum(sd.trailingAnnualDividendYield);
+      const data = {
+        pe: rawNum(sd.trailingPE),
+        forwardPe: rawNum(ks.forwardPE) ?? rawNum(sd.forwardPE),
+        ps: rawNum(sd.priceToSalesTrailing12Months),
+        pb: rawNum(ks.priceToBook),
+        eps: rawNum(ks.trailingEps),
+        marketCap: rawNum(sd.marketCap) ?? rawNum(pr.marketCap),
+        divYield: dy != null ? dy * 100 : null,
+        beta: rawNum(sd.beta) ?? rawNum(ks.beta),
+      };
+      out[t] = data;
+      _fundCache.set(t, { at: now, data });
+    } catch { out[t] = {}; }
+  });
+  return out;
+}
+
 // ─── routes ─────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => {
@@ -285,19 +360,23 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
       ...HOLDINGS.stocks.map((s) => s.ticker),
       ...HOLDINGS.etfs.map((e) => e.ticker),
     ];
-    const quotes = await fetchQuotes(liveTickers);
+    const [quotes, funds] = await Promise.all([
+      fetchQuotes(liveTickers),
+      yahooFundamentals(HOLDINGS.stocks.map((s) => s.ticker)),
+    ]);
 
     const stocks = HOLDINGS.stocks.map((s) => {
       const q = quotes[s.ticker] || {};
+      const f = funds[s.ticker] || {};
       const price = q.price ?? null;
       return {
         ...s,
         price,
         change: q.change ?? null,
         gainPct: price != null ? ((price - s.avgCost) / s.avgCost) * 100 : null,
-        pe: q.pe, forwardPe: q.forwardPe, pb: q.pb, eps: q.eps,
-        marketCap: q.marketCap, divYield: q.divYield,
-        week52High: q.week52High, week52Low: q.week52Low,
+        pe: f.pe ?? null, pb: f.pb ?? null, ps: f.ps ?? null, eps: f.eps ?? null,
+        marketCap: f.marketCap ?? null, divYield: f.divYield ?? null,
+        week52High: q.week52High ?? null, week52Low: q.week52Low ?? null,
       };
     });
     const etfs = HOLDINGS.etfs.map((e) => {
@@ -569,68 +648,71 @@ app.get("/api/stock/:ticker", requireAuth, async (req, res) => {
     };
     const rg = rangeMap[req.query.range] || rangeMap["5y"];
 
-    // Price/52wk/history come from Yahoo (covers every exchange).
-    // Fundamentals come from FMP (US coverage on the free tier — non-US
-    // simply returns null, so the page degrades gracefully).
-    const fmpKey = process.env.FMP_API_KEY;
-    const fmpGet = async (path) => {
-      if (!fmpKey) return null;
-      try {
-        const r = await fetch(`https://financialmodelingprep.com/stable/${path}&apikey=${fmpKey}`);
-        if (!r.ok) return null;
-        const d = await r.json();
-        return Array.isArray(d) ? (d[0] || null) : d;
-      } catch { return null; }
-    };
-
-    const [metaR, histR, profileR, ratiosR] = await Promise.allSettled([
+    // Price/52wk + history from the keyless chart endpoint (all exchanges).
+    // Fundamentals/profile/earnings/owners from quoteSummary (crumb-based,
+    // also all exchanges). Everything is best-effort: if quoteSummary is
+    // unavailable the page still shows price + chart.
+    const [metaR, histR, sumR] = await Promise.allSettled([
       yahooMeta(sym),
       yahooHistory(sym, rg),
-      fmpGet(`profile?symbol=${encodeURIComponent(ticker)}`),
-      fmpGet(`ratios-ttm?symbol=${encodeURIComponent(ticker)}`),
+      yahooQuoteSummary(sym, [
+        "price", "summaryDetail", "defaultKeyStatistics", "financialData",
+        "calendarEvents", "summaryProfile", "institutionOwnership",
+      ]),
     ]);
 
     const m    = metaR.status === "fulfilled" ? metaR.value : {};
     const hist = histR.status === "fulfilled" ? histR.value : [];
-    const prof = profileR.status === "fulfilled" ? (profileR.value || {}) : {};
-    const rat  = ratiosR.status === "fulfilled" ? (ratiosR.value || {}) : {};
+    const s    = sumR.status === "fulfilled" ? sumR.value : {};
+    const sd = s.summaryDetail || {}, ks = s.defaultKeyStatistics || {};
+    const fd = s.financialData || {}, pr = s.price || {};
+    const prof = s.summaryProfile || {}, cal = s.calendarEvents || {};
 
-    const price = m.regularMarketPrice ?? prof.price ?? null;
+    const price = m.regularMarketPrice ?? rawNum(pr.regularMarketPrice) ?? null;
     const prev  = m.chartPreviousClose ?? m.previousClose ?? null;
-    const change = (price != null && prev) ? ((price - prev) / prev) * 100 : (prof.changePercentage ?? null);
-    const asPct = (x) => (x != null ? x * 100 : null);
+    const change = (price != null && prev) ? ((price - prev) / prev) * 100
+                 : rawNum(pr.regularMarketChangePercent) != null ? rawNum(pr.regularMarketChangePercent) * 100 : null;
+    const pctOf = (x) => { const v = rawNum(x); return v != null ? v * 100 : null; };
+
+    const owners = (s.institutionOwnership?.ownershipList || []).slice(0, 8).map((o) => ({
+      organization: o.organization,
+      pctHeld: pctOf(o.pctHeld),
+      value: rawNum(o.value),
+      reportDate: rawNum(o.reportDate) ? new Date(rawNum(o.reportDate) * 1000).toISOString().slice(0, 10) : null,
+    }));
+    const earningsDates = cal.earnings?.earningsDate || [];
 
     res.json({
       ticker,
-      name: m.longName || m.shortName || prof.companyName || ticker,
-      currency: m.currency || prof.currency || null,
+      name: pr.longName || pr.shortName || m.longName || m.shortName || ticker,
+      currency: m.currency || pr.currency || null,
       price,
       change,
       sector: prof.sector || null,
       industry: prof.industry || null,
       country: prof.country || null,
       website: prof.website || null,
-      summary: prof.description || null,
+      summary: prof.longBusinessSummary || null,
       stats: {
-        peTrailing: rat.priceToEarningsRatioTTM ?? null,
-        peForward: null,
-        ps: rat.priceToSalesRatioTTM ?? null,
-        pb: rat.priceToBookRatioTTM ?? null,
-        eps: rat.netIncomePerShareTTM ?? null,
-        marketCap: prof.marketCap ?? null,
-        beta: prof.beta ?? null,
-        dividendYield: asPct(rat.dividendYieldTTM),
-        profitMargin: asPct(rat.netProfitMarginTTM),
-        revenueGrowth: null,
-        roe: null,
-        week52High: m.fiftyTwoWeekHigh ?? null,
-        week52Low: m.fiftyTwoWeekLow ?? null,
-        recommendation: null,
+        peTrailing: rawNum(sd.trailingPE),
+        peForward: rawNum(ks.forwardPE) ?? rawNum(sd.forwardPE),
+        ps: rawNum(sd.priceToSalesTrailing12Months),
+        pb: rawNum(ks.priceToBook),
+        eps: rawNum(ks.trailingEps),
+        marketCap: rawNum(sd.marketCap) ?? rawNum(pr.marketCap),
+        beta: rawNum(sd.beta) ?? rawNum(ks.beta),
+        dividendYield: pctOf(sd.dividendYield),
+        profitMargin: pctOf(fd.profitMargins),
+        revenueGrowth: pctOf(fd.revenueGrowth),
+        roe: pctOf(fd.returnOnEquity),
+        week52High: m.fiftyTwoWeekHigh ?? rawNum(sd.fiftyTwoWeekHigh),
+        week52Low: m.fiftyTwoWeekLow ?? rawNum(sd.fiftyTwoWeekLow),
+        recommendation: fd.recommendationKey ?? null,
       },
-      nextEarnings: null,
-      exDividend: null,
-      dividendDate: null,
-      owners: [],
+      nextEarnings: rawNum(earningsDates[0]) ? new Date(rawNum(earningsDates[0]) * 1000).toISOString().slice(0, 10) : null,
+      exDividend: rawNum(cal.exDividendDate) ? new Date(rawNum(cal.exDividendDate) * 1000).toISOString().slice(0, 10) : null,
+      dividendDate: rawNum(cal.dividendDate) ? new Date(rawNum(cal.dividendDate) * 1000).toISOString().slice(0, 10) : null,
+      owners,
       history: hist.map((p) => ({ t: p.t, c: p.c })),
     });
   } catch (e) {
