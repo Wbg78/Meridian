@@ -210,6 +210,38 @@ async function yahooHistory(yahooSym, { range = "1y", interval = "1d" } = {}) {
   return out;
 }
 
+// Period performance (1W/1M/3M/6M/1Y) from 1y of daily closes, cached 1h.
+// 1D comes from the live quote's change, so it isn't computed here.
+const _histCache = new Map(); // ticker -> { at, series }
+const HIST_TTL = 60 * 60_000;
+
+async function periodReturns(ticker) {
+  const now = Date.now();
+  let entry = _histCache.get(ticker);
+  if (!entry || now - entry.at > HIST_TTL) {
+    let series = [];
+    try { series = await yahooHistory(toYahoo(ticker), { range: "1y", interval: "1d" }); } catch { /* empty */ }
+    entry = { at: now, series };
+    _histCache.set(ticker, entry);
+  }
+  const s = entry.series;
+  if (s.length < 2) return {};
+  const last = s[s.length - 1].c;
+  const lastT = new Date(s[s.length - 1].t).getTime();
+  const retSince = (days) => {
+    const target = lastT - days * 86400000;
+    for (let i = s.length - 1; i >= 0; i--) {
+      if (new Date(s[i].t).getTime() <= target) {
+        return s[i].c ? +(((last - s[i].c) / s[i].c) * 100).toFixed(2) : null;
+      }
+    }
+    return null;
+  };
+  const first = s[0].c; // oldest point in the 1y window ≈ 1 year ago
+  const y1 = first ? +(((last - first) / first) * 100).toFixed(2) : null;
+  return { w1: retSince(7), m1: retSince(30), m3: retSince(91), m6: retSince(182), y1 };
+}
+
 // Map chart meta -> our quote shape. Change % is derived from the
 // previous close. (PE/marketCap/divYield aren't in the chart meta;
 // the stock-detail route enriches those separately.)
@@ -264,35 +296,65 @@ async function fetchQuotes(tickers) {
 // hold (US + Nordic + EU), for free. It needs a cookie + "crumb"; we
 // fetch those ONCE and cache them (~25 min) so we don't trip the rate
 // limiter that blocked the old library.
+const YH2 = "https://query2.finance.yahoo.com";
 let _yc = { cookie: null, crumb: null, at: 0 };
 const YC_TTL = 25 * 60_000;
 
+// Get a (cookie, crumb) pair, trying richer cookie sources and both
+// Yahoo hosts — datacenter IPs get throttled, so we work to recover.
 async function getYahooCreds(force = false) {
   if (!force && _yc.crumb && Date.now() - _yc.at < YC_TTL) return _yc;
-  const cr = await fetch("https://fc.yahoo.com", { headers: YH_HEADERS });
-  const setCookies = typeof cr.headers.getSetCookie === "function" ? cr.headers.getSetCookie() : [];
-  const cookie = setCookies.map((c) => c.split(";")[0]).join("; ");
-  const crumbRes = await fetch(`${YH}/v1/test/getcrumb`, { headers: { ...YH_HEADERS, Cookie: cookie } });
-  const crumb = (await crumbRes.text()).trim();
-  if (!crumb || crumb.includes("<") || crumb.length > 30) throw new Error("no crumb");
+  let cookie = "";
+  for (const url of ["https://finance.yahoo.com/quote/AAPL", "https://fc.yahoo.com"]) {
+    try {
+      const cr = await fetch(url, { headers: YH_HEADERS });
+      const sc = typeof cr.headers.getSetCookie === "function" ? cr.headers.getSetCookie() : [];
+      if (sc.length) { cookie = sc.map((c) => c.split(";")[0]).join("; "); break; }
+    } catch { /* try next */ }
+  }
+  let crumb = "";
+  for (const host of [YH, YH2]) {
+    try {
+      const r = await fetch(`${host}/v1/test/getcrumb`, { headers: { ...YH_HEADERS, Cookie: cookie } });
+      const c = (await r.text()).trim();
+      if (c && !c.includes("<") && c.length <= 30) { crumb = c; break; }
+    } catch { /* try next */ }
+  }
+  if (!crumb) throw new Error("no crumb");
   _yc = { cookie, crumb, at: Date.now() };
   return _yc;
 }
 
-// Fetch quoteSummary modules for ONE symbol, refreshing creds once on 401/429.
+// Fetch quoteSummary modules for ONE symbol. Retries up to 3× across both
+// hosts, refreshing creds on auth/limit errors (Render's IP is flaky here).
 async function yahooQuoteSummary(yahooSym, modules) {
   const mod = modules.join(",");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const creds = await getYahooCreds(attempt > 0);
-    const url = `${YH}/v10/finance/quoteSummary/${encodeURIComponent(yahooSym)}?modules=${mod}&crumb=${encodeURIComponent(creds.crumb)}`;
-    const r = await fetch(url, { headers: { ...YH_HEADERS, Cookie: creds.cookie } });
-    if ((r.status === 401 || r.status === 429) && attempt === 0) continue;
-    if (!r.ok) throw new Error("quoteSummary " + r.status);
-    const res = (await r.json())?.quoteSummary?.result?.[0];
-    if (!res) throw new Error("no data");
-    return res;
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const creds = await getYahooCreds(attempt > 0);
+      const host = attempt % 2 ? YH2 : YH;
+      const url = `${host}/v10/finance/quoteSummary/${encodeURIComponent(yahooSym)}?modules=${mod}&crumb=${encodeURIComponent(creds.crumb)}`;
+      const r = await fetch(url, { headers: { ...YH_HEADERS, Cookie: creds.cookie } });
+      if (r.status === 401 || r.status === 429 || r.status === 403) { lastErr = new Error("qs " + r.status); await sleep(250 * (attempt + 1)); continue; }
+      if (!r.ok) throw new Error("quoteSummary " + r.status);
+      const res = (await r.json())?.quoteSummary?.result?.[0];
+      if (!res) throw new Error("no data");
+      return res;
+    } catch (e) { lastErr = e; await sleep(250 * (attempt + 1)); }
   }
-  throw new Error("quoteSummary failed");
+  throw lastErr || new Error("quoteSummary failed");
+}
+
+// Cache full quoteSummary results per symbol (30 min) so once we get a
+// good fetch through Render's flaky path, the detail page stays populated.
+const _detailCache = new Map(); // yahooSym -> { at, res }
+async function cachedSummary(sym, modules) {
+  const c = _detailCache.get(sym);
+  if (c && Date.now() - c.at < 30 * 60_000) return c.res;
+  const res = await yahooQuoteSummary(sym, modules);
+  _detailCache.set(sym, { at: Date.now(), res });
+  return res;
 }
 
 // Yahoo wraps numbers as { raw, fmt }; pull the raw value.
@@ -361,10 +423,12 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
       ...HOLDINGS.stocks.map((s) => s.ticker),
       ...HOLDINGS.etfs.map((e) => e.ticker),
     ];
-    const [quotes, funds] = await Promise.all([
+    const [quotes, funds, perfList] = await Promise.all([
       fetchQuotes(liveTickers),
       yahooFundamentals(HOLDINGS.stocks.map((s) => s.ticker)),
+      pooled(liveTickers, 4, (t) => periodReturns(t).then((p) => [t, p]).catch(() => [t, {}])),
     ]);
+    const perf = Object.fromEntries(perfList);
 
     const stocks = HOLDINGS.stocks.map((s) => {
       const q = quotes[s.ticker] || {};
@@ -375,6 +439,7 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
         price,
         change: q.change ?? null,
         gainPct: price != null ? ((price - s.avgCost) / s.avgCost) * 100 : null,
+        perf: { d1: q.change ?? null, ...(perf[s.ticker] || {}) },
         pe: f.pe ?? null, pb: f.pb ?? null, ps: f.ps ?? null, eps: f.eps ?? null,
         marketCap: f.marketCap ?? null, divYield: f.divYield ?? null,
         week52High: q.week52High ?? null, week52Low: q.week52Low ?? null,
@@ -389,6 +454,7 @@ app.get("/api/portfolio", requireOwner, async (req, res) => {
         price,
         change: q.change ?? null,
         gainPct: price != null ? ((price - e.avgCost) / e.avgCost) * 100 : null,
+        perf: { d1: q.change ?? null, ...(perf[e.ticker] || {}) },
         tvSymbol: toTradingView(e.ticker),
       };
     });
@@ -741,7 +807,7 @@ app.get("/api/stock/:ticker", requireAuth, async (req, res) => {
     const [metaR, histR, sumR] = await Promise.allSettled([
       yahooMeta(sym),
       yahooHistory(sym, rg),
-      yahooQuoteSummary(sym, [
+      cachedSummary(sym, [
         "price", "summaryDetail", "defaultKeyStatistics", "financialData",
         "calendarEvents", "summaryProfile", "institutionOwnership",
       ]),

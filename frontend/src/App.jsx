@@ -373,7 +373,7 @@ function LineChart({ data, height=160 }) {
 // Avanza-style detail panel for one stock
 // Embedded TradingView advanced chart (free widget). Full candles,
 // indicators, timeframes & drawing tools — no API key needed.
-function TVChart({ symbol, height = 380 }) {
+function TVChart({ symbol, height = 380, resizable = false }) {
   const ref = useRef(null);
   useEffect(() => {
     const container = ref.current;
@@ -390,15 +390,17 @@ function TVChart({ symbol, height = 380 }) {
       theme: "dark",
       style: "1",
       locale: "en",
-      hide_side_toolbar: true,
+      hide_side_toolbar: false,
       allow_symbol_change: false,
       withdateranges: true,
+      details: true,
       support_host: "https://www.tradingview.com",
     });
     container.appendChild(script);
     return () => { if (container) container.innerHTML = ""; };
   }, [symbol]);
-  return <div className="tradingview-widget-container" ref={ref} style={{ height, width: "100%" }} />;
+  return <div className="tradingview-widget-container" ref={ref}
+    style={{ height, width: "100%", ...(resizable ? { resize: "vertical", overflow: "auto", minHeight: 260 } : {}) }} />;
 }
 
 // Full-screen-ish modal that just shows a TradingView chart — used for
@@ -406,7 +408,7 @@ function TVChart({ symbol, height = 380 }) {
 function ChartModal({ tvSymbol, title, subtitle, onClose }) {
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
-      <div className="bg-[var(--bg)] border border-[var(--border)] rounded-t-3xl sm:rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+      <div className="bg-[var(--bg)] border border-[var(--border)] rounded-t-3xl sm:rounded-2xl w-full max-w-6xl h-[92vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
         <div className="bg-[var(--bg)] border-b border-[var(--border)] px-4 py-3 flex items-center justify-between flex-shrink-0">
           <div>
             <p className="text-[var(--text)] font-black text-base">{title}</p>
@@ -415,7 +417,7 @@ function ChartModal({ tvSymbol, title, subtitle, onClose }) {
           <button onClick={onClose} className="text-[var(--muted)] hover:text-[var(--text)] w-8 h-8 rounded-full border border-[var(--border)] flex items-center justify-center">✕</button>
         </div>
         <div className="p-2 flex-1 min-h-0">
-          <TVChart symbol={tvSymbol} height="68vh" />
+          <TVChart symbol={tvSymbol} height="100%" />
         </div>
       </div>
     </div>
@@ -426,6 +428,7 @@ function StockDetail({ ticker, token, onClose }) {
   const [data,setData] = useState(null);
   const [range,setRange] = useState("5y");
   const [chartMode,setChartMode] = useState("tv");
+  const [fullChart,setFullChart] = useState(false);
   const [loading,setLoading] = useState(true);
   const [err,setErr] = useState(false);
   useEffect(()=>{
@@ -448,7 +451,7 @@ function StockDetail({ ticker, token, onClose }) {
   ];
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
-      <div className="bg-[var(--bg)] border border-[var(--border)] rounded-t-3xl sm:rounded-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+      <div className="bg-[var(--bg)] border border-[var(--border)] rounded-t-3xl sm:rounded-2xl w-full max-w-4xl max-h-[92vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
         <div className="sticky top-0 bg-[var(--bg)] border-b border-[var(--border)] px-4 py-3 flex items-center justify-between">
           <div>
             <p className="text-[var(--text)] font-black text-base">{ticker}</p>
@@ -469,10 +472,16 @@ function StockDetail({ ticker, token, onClose }) {
                 {[["tv","📈 Interactive"],["line","Line"]].map(([m,lbl])=>(
                   <button key={m} onClick={()=>setChartMode(m)} className={`text-[10px] px-2 py-1 rounded-lg font-bold whitespace-nowrap ${chartMode===m?"bg-violet-500/15 text-violet-400 border border-violet-500/25":"text-[var(--muted)] border border-[var(--border)]"}`}>{lbl}</button>
                 ))}
+                {chartMode==="tv" && data.tvSymbol && (
+                  <button onClick={()=>setFullChart(true)} title="Fullscreen chart" className="text-[10px] px-2 py-1 rounded-lg font-bold text-[var(--muted)] border border-[var(--border)] hover:text-violet-400">⛶</button>
+                )}
               </div>
             </div>
             {chartMode==="tv" && data.tvSymbol ? (
-              <Card className="p-0 overflow-hidden"><TVChart symbol={data.tvSymbol} height={360} /></Card>
+              <>
+                <Card className="p-0 overflow-hidden"><TVChart symbol={data.tvSymbol} height={440} resizable /></Card>
+                <p className="text-[var(--muted)] text-[10px] -mt-2">Drag the bottom-right corner to resize · ⛶ for fullscreen</p>
+              </>
             ) : (
               <>
                 <div className="flex gap-1 justify-end">
@@ -483,6 +492,7 @@ function StockDetail({ ticker, token, onClose }) {
                 <Card><LineChart data={data.history}/></Card>
               </>
             )}
+            {fullChart && data.tvSymbol && <ChartModal tvSymbol={data.tvSymbol} title={ticker} subtitle={data.name} onClose={()=>setFullChart(false)} />}
             <div>
               <SectionLabel>Key ratios</SectionLabel>
               <div className="grid grid-cols-3 gap-2">
@@ -555,7 +565,7 @@ function PortfolioView({ isOwner, token }) {
 
       {tab === "stocks" && (
         <div className="space-y-2">
-          {MY_PORTFOLIO.stocks.map((p,i) => {
+          {[...MY_PORTFOLIO.stocks].sort((a,b)=>toSEK(b.price*b.shares,b.currency)-toSEK(a.price*a.shares,a.currency)).map((p,i) => {
             const val    = toSEK(p.price * p.shares, p.currency);
             const weight = (val / total * 100).toFixed(1);
             const gainPct= ((p.price - p.avgCost) / p.avgCost * 100).toFixed(1);
@@ -582,6 +592,16 @@ function PortfolioView({ isOwner, token }) {
                       <div key={k}><p className="text-[var(--muted)] text-[8px] uppercase tracking-wide">{k}</p><p className="text-[var(--text)] text-[11px] font-bold">{v}</p></div>
                     ))}
                   </div>
+                  {p.perf && (
+                    <div className="grid grid-cols-5 gap-1 pt-2 mt-1 border-t border-[var(--border)]">
+                      {[["1W",p.perf.w1],["1M",p.perf.m1],["3M",p.perf.m3],["6M",p.perf.m6],["1Y",p.perf.y1]].map(([k,v])=>(
+                        <div key={k}>
+                          <p className="text-[var(--muted)] text-[8px] uppercase tracking-wide">{k}</p>
+                          <p className={`text-[11px] font-bold ${v==null?"text-[var(--muted)]":v>=0?"text-emerald-400":"text-red-400"}`}>{v==null?"—":`${v>=0?"+":""}${v.toFixed(1)}%`}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <p className="text-violet-400 text-[10px] mt-2">Tap for chart, owners &amp; next report →</p>
                 </div>
               </Card>
@@ -1040,11 +1060,15 @@ function MarketOverview({ token }) {
   const [chart, setChart] = useState(null);
   useEffect(() => {
     if (!token) return; let c = false;
-    fetch(`${BACKEND_URL}/api/market`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setData(d); }).catch(() => { if (!c) setErr(true); });
+    // Retry a few times — the free backend cold-starts (~30s) after idle.
+    const load = (tries=0) => fetch(`${BACKEND_URL}/api/market`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { if (!c) { setData(d); setErr(false); } })
+      .catch(() => { if (c) return; if (tries < 4) setTimeout(() => load(tries+1), 4000); else setErr(true); });
+    load();
     return () => { c = true; };
   }, [token]);
-  if (err) return <Card><p className="text-red-400 text-sm">Couldn't load market data (Yahoo may be rate-limited — try again shortly).</p></Card>;
+  if (err) return <Card><p className="text-red-400 text-sm">Couldn't load market data — the backend may be waking up. Give it ~30s and reopen this tab.</p></Card>;
   if (!data) return <Card><p className="text-[var(--muted)] text-sm">Loading market…</p></Card>;
   const groups = [["Indices","indices"],["Commodities","commodities"],["Crypto","crypto"],["FX","fx"]];
   return (
