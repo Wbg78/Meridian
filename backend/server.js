@@ -544,6 +544,80 @@ app.get("/api/news", requireAuth, async (req, res) => {
   }
 });
 
+// ─── SENTIMENT (free, transparent) ──────────────────────────────
+// Market-wide: the REAL CNN Fear & Greed index. Per-stock: a finance-
+// lexicon score over the week's news headlines, returning the headlines
+// themselves as evidence so the number is never a black box. (X/Twitter
+// and StockTwits APIs are paid; this is the honest free alternative.)
+const BULL_WORDS = /\b(surg\w*|soar\w*|jump\w*|rall\w*|beat\w*|tops?|upgrad\w*|record|grow\w*|gains?|rise|rises|rising|risen|rose|climb\w*|outperform\w*|bullish|strong\w*|profit\w*|wins?|won|contract\w*|approv\w*|expand\w*|rais\w*|boost\w*|optimis\w*|breakthrough|rebound\w*|higher|surpass\w*|rocket\w*|soars?|best)\b/gi;
+const BEAR_WORDS = /\b(fall\w*|fell|drop\w*|plung\w*|slump\w*|miss\w*|downgrad\w*|loss\w*|lawsuit\w*|prob\w*|investigat\w*|cuts?|warn\w*|weak\w*|declin\w*|sink\w*|sell-?off\w*|bearish|recall\w*|fraud|scrutiny|layoff\w*|halts?|tumbl\w*|crash\w*|fears?|risks?|disappoint\w*|slash\w*|lower|downturn|bankrupt\w*|delay\w*|worst|slow\w*|woes?|sluggish|cools?)\b/gi;
+
+function leanOf(text) {
+  const t = " " + (text || "") + " ";
+  const b = (t.match(BULL_WORDS) || []).length;
+  const r = (t.match(BEAR_WORDS) || []).length;
+  return b > r ? "bull" : r > b ? "bear" : "neutral";
+}
+
+let _fgCache = { at: 0, data: null };
+async function fearGreed() {
+  if (_fgCache.data && Date.now() - _fgCache.at < 3600_000) return _fgCache.data;
+  try {
+    const r = await fetch("https://production.dataviz.cnn.io/index/fearandgreed/current", {
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Referer": "https://www.cnn.com/markets/fear-and-greed" },
+    });
+    if (!r.ok) throw new Error("cnn " + r.status);
+    const d = await r.json();
+    const data = {
+      score: Math.round(d.score),
+      rating: d.rating,
+      previousClose: Math.round(d.previous_close),
+      week: Math.round(d.previous_1_week),
+      month: Math.round(d.previous_1_month),
+      year: Math.round(d.previous_1_year),
+    };
+    _fgCache = { at: Date.now(), data };
+    return data;
+  } catch { return null; }
+}
+
+let _sentCache = { at: 0, data: null };
+const SENT_TTL = 30 * 60_000;
+
+app.get("/api/sentiment", requireAuth, async (req, res) => {
+  try {
+    if (_sentCache.data && Date.now() - _sentCache.at < SENT_TTL) return res.json(_sentCache.data);
+    const fg = await fearGreed();
+    const entries = Object.entries(HOLDINGS_NEWS_TERMS); // [ticker, searchTerm]
+    const scored = await pooled(entries, 4, async ([ticker, term]) => {
+      let articles = [];
+      try {
+        articles = (await fetchGoogleNews(`${term} stock`, { hl: "en-US", gl: "US", ceid: "US:en" }, 7)).slice(0, 8);
+      } catch { /* leave empty */ }
+      const headlines = articles.map((a) => ({ headline: a.headline, source: a.source, link: a.link, time: a.time, lean: leanOf(a.headline) }));
+      const bull = headlines.filter((h) => h.lean === "bull").length;
+      const bear = headlines.filter((h) => h.lean === "bear").length;
+      const denom = headlines.length || 1;
+      const name = (HOLDINGS.stocks.find((s) => s.ticker === ticker) || {}).name || term;
+      return {
+        ticker, name, mentions: headlines.length,
+        bullish: Math.round((bull / denom) * 100),
+        bearish: Math.round((bear / denom) * 100),
+        neutral: Math.round(((denom - bull - bear) / denom) * 100),
+        label: bull > bear ? "Bullish" : bear > bull ? "Bearish" : "Neutral",
+        net: bull - bear,
+        headlines,
+      };
+    });
+    scored.sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || b.mentions - a.mentions);
+    const data = { fearGreed: fg, tickers: scored, updated: new Date().toISOString() };
+    _sentCache = { at: Date.now(), data };
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Sentiment unavailable: " + String(e) });
+  }
+});
+
 // Congressional trades — US Senate + House STOCK Act disclosures, via
 // Financial Modeling Prep's free /stable API (key-based, server-friendly).
 app.get("/api/capitol", requireAuth, async (req, res) => {

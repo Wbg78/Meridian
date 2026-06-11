@@ -851,50 +851,102 @@ function AnalyticsView({ token }) {
   );
 }
 
-function SentimentView() {
-  const fg = SENTIMENT_DATA.fearGreed;
-  const fgLabel = fg>=75?"Extreme Greed":fg>=55?"Greed":fg>=45?"Neutral":fg>=25?"Fear":"Extreme Fear";
-  const fgColor = fg>=55?"text-emerald-400":fg>=45?"text-amber-400":"text-red-400";
-
+// One stock's news-derived sentiment — tap to reveal the headlines that
+// produced the score (each dotted by its bull/bear/neutral lean).
+function SentimentTicker({ t }) {
+  const [open, setOpen] = useState(false);
+  const labelColor = t.label==="Bullish"?"green":t.label==="Bearish"?"red":"gray";
   return (
-    <div className="space-y-5">
-      <Card accent>
-        <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest font-semibold mb-2">CNN Fear & Greed Index</p>
-        <div className="flex items-end gap-4 mb-4">
-          <p className={`text-5xl font-black ${fgColor}`}>{fg}</p>
-          <div className="pb-1"><p className={`text-xl font-bold ${fgColor}`}>{fgLabel}</p></div>
+    <Card>
+      <div className="cursor-pointer" onClick={()=>setOpen(o=>!o)}>
+        <div className="flex justify-between items-center mb-2">
+          <div className="flex gap-2 items-center">
+            <span className="text-[var(--text)] font-bold">{t.ticker}</span>
+            <Pill color={labelColor} sm>{t.label}</Pill>
+          </div>
+          <span className="text-[var(--muted)] text-xs">{t.mentions} headlines</span>
         </div>
-        <div className="h-2.5 rounded-full overflow-hidden bg-gradient-to-r from-red-600 via-amber-400 to-emerald-500 relative">
-          <div className="absolute top-0 w-2 h-full bg-white rounded-full shadow" style={{left:`calc(${fg}% - 4px)`}} />
+        <div className="flex h-2 rounded-full overflow-hidden gap-0.5 bg-[var(--border)]">
+          {t.bullish>0 && <div className="bg-emerald-500" style={{width:`${t.bullish}%`}} />}
+          {t.neutral>0 && <div className="bg-zinc-500" style={{width:`${t.neutral}%`}} />}
+          {t.bearish>0 && <div className="bg-red-500" style={{width:`${t.bearish}%`}} />}
         </div>
         <div className="flex justify-between mt-1">
-          <span className="text-red-400 text-[10px] font-semibold">Fear</span>
-          <span className="text-emerald-400 text-[10px] font-semibold">Greed</span>
+          <span className="text-emerald-400 text-[11px] font-bold">🟢 {t.bullish}%</span>
+          <span className="text-[var(--muted)] text-[11px]">{t.neutral}% neutral</span>
+          <span className="text-red-400 text-[11px] font-bold">{t.bearish}% 🔴</span>
         </div>
-      </Card>
-
-      <SectionLabel>StockTwits — Your Positions</SectionLabel>
-      <div className="space-y-2">
-        {Object.entries(SENTIMENT_DATA.tickers).map(([ticker,s]) => (
-          <Card key={ticker}>
-            <div className="flex justify-between items-center mb-2">
-              <div className="flex gap-2 items-center">
-                <span className="text-[var(--text)] font-bold">{ticker}</span>
-                {s.trending && <Pill color="violet" sm>Trending</Pill>}
+        <p className="text-violet-400 text-[10px] mt-1.5 font-semibold">{open?"▲ hide headlines":"▼ see the headlines behind this"}</p>
+      </div>
+      {open && (
+        <div className="mt-2 pt-2 border-t border-[var(--border)] space-y-2">
+          {t.headlines.length===0 && <p className="text-[var(--muted)] text-xs">No recent headlines found.</p>}
+          {t.headlines.map((h,i)=>(
+            <a key={i} href={h.link} target="_blank" rel="noreferrer" className="flex gap-2 hover:opacity-80">
+              <span className={`mt-1 w-1.5 h-1.5 rounded-full flex-shrink-0 ${h.lean==="bull"?"bg-emerald-500":h.lean==="bear"?"bg-red-500":"bg-zinc-500"}`} />
+              <div className="min-w-0">
+                <p className="text-[var(--text)] text-xs leading-snug">{h.headline}</p>
+                <p className="text-[var(--muted)] text-[10px]">{h.source}{h.time?" · "+timeAgo(h.time):""}</p>
               </div>
-              <span className="text-[var(--muted)] text-xs">{s.messages.toLocaleString()} msgs</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function SentimentView({ token }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    if (!token) return; let c = false; setErr(false);
+    fetch(`${BACKEND_URL}/api/sentiment`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setData(d); }).catch(() => { if (!c) setErr(true); });
+    return () => { c = true; };
+  }, [token]);
+  const fg = data?.fearGreed;
+  const fgColor = fg?.score==null?"text-[var(--muted)]":fg.score>=55?"text-emerald-400":fg.score>=45?"text-amber-400":"text-red-400";
+  const cap = s => s ? s.replace(/\b\w/g, c => c.toUpperCase()) : "";
+  return (
+    <div className="space-y-5">
+      {err && <Card><p className="text-red-400 text-sm">Couldn't load sentiment — try again shortly.</p></Card>}
+      {!data && !err && <Card><p className="text-[var(--muted)] text-sm">Reading the week's headlines…</p></Card>}
+      {data && <>
+        {fg ? (
+          <Card accent>
+            <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest font-semibold mb-2">CNN Fear &amp; Greed Index · live</p>
+            <div className="flex items-end gap-4 mb-4">
+              <p className={`text-5xl font-black ${fgColor}`}>{fg.score}</p>
+              <div className="pb-1"><p className={`text-xl font-bold ${fgColor}`}>{cap(fg.rating)}</p></div>
             </div>
-            <div className="flex h-2 rounded-full overflow-hidden gap-0.5">
-              <div className="bg-emerald-500 rounded-l-full" style={{width:`${s.bullish}%`}} />
-              <div className="bg-red-500 rounded-r-full"    style={{width:`${s.bearish}%`}} />
+            <div className="h-2.5 rounded-full overflow-hidden bg-gradient-to-r from-red-600 via-amber-400 to-emerald-500 relative">
+              <div className="absolute top-0 w-2 h-full bg-white rounded-full shadow" style={{left:`calc(${fg.score}% - 4px)`}} />
             </div>
             <div className="flex justify-between mt-1">
-              <span className="text-emerald-400 text-xs font-bold">🟢 {s.bullish}%</span>
-              <span className="text-red-400 text-xs font-bold">{s.bearish}% 🔴</span>
+              <span className="text-red-400 text-[10px] font-semibold">Fear</span>
+              <span className="text-emerald-400 text-[10px] font-semibold">Greed</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-3">
+              {[["Prev close",fg.previousClose],["1 week ago",fg.week],["1 month ago",fg.month]].map(([k,v])=>(
+                <div key={k} className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-2 text-center"><p className="text-[var(--muted)] text-[9px] uppercase">{k}</p><p className="text-[var(--text)] text-sm font-bold">{v}</p></div>
+              ))}
             </div>
           </Card>
-        ))}
-      </div>
+        ) : (
+          <Card><p className="text-[var(--muted)] text-sm">CNN Fear &amp; Greed unavailable right now — the per-stock sentiment below still works.</p></Card>
+        )}
+
+        <div>
+          <SectionLabel>Per-stock sentiment · this week's news</SectionLabel>
+          <Card className="border-amber-500/20 bg-amber-500/5 mb-2">
+            <p className="text-amber-400 text-[11px] leading-relaxed">📰 Each score is computed from the real news headlines below — tap a stock to see the exact articles. Not from X or Reddit (those APIs are paid).</p>
+          </Card>
+          <div className="space-y-2">
+            {(data.tickers||[]).map(t => <SentimentTicker key={t.ticker} t={t} />)}
+          </div>
+        </div>
+      </>}
     </div>
   );
 }
