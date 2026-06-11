@@ -769,28 +769,47 @@ app.get("/api/capitol", requireAuth, async (req, res) => {
   }
 });
 
-// Upcoming earnings for your holdings, soonest first. Date + last EPS
-// beat/miss from Yahoo's calendar/earnings modules. Cached 6h.
+// Upcoming earnings for your holdings, soonest first. Uses FMP's earnings
+// endpoint (key-based → reliable from the server, unlike Yahoo's throttled
+// calendar). FMP free covers US listings; non-US holdings return no date.
+// Cached 6h.
 let _earnCache = { at: 0, data: null };
 app.get("/api/earnings", requireAuth, async (req, res) => {
+  const key = process.env.FMP_API_KEY;
+  if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
   try {
     if (_earnCache.data && Date.now() - _earnCache.at < 6 * 3600_000) return res.json(_earnCache.data);
-    const rows = await pooled(HOLDINGS.stocks, 3, async (s) => {
-      const base = { ticker: s.ticker, name: s.name, sector: s.sector || null, tvSymbol: toTradingView(s.ticker), nextEarnings: null, epsEstimate: null, epsActual: null };
+    const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+    const rows = await pooled(HOLDINGS.stocks, 4, async (s) => {
+      const base = { ticker: s.ticker, name: s.name, sector: s.sector || null, tvSymbol: toTradingView(s.ticker), nextEarnings: null, epsEstimate: null, revEstimate: null, lastEpsActual: null, lastEpsEstimate: null };
+      // 1) FMP — reliable for the US symbols it covers (incl. EPS + revenue).
       try {
-        const r = await cachedSummary(toYahoo(s.ticker), ["calendarEvents", "earningsHistory"]);
-        const ed = r.calendarEvents?.earnings?.earningsDate?.[0];
-        if (rawNum(ed)) base.nextEarnings = new Date(rawNum(ed) * 1000).toISOString().slice(0, 10);
-        const hist = r.earningsHistory?.history || [];
-        const last = hist[hist.length - 1] || {};
-        base.epsEstimate = rawNum(last.epsEstimate);
-        base.epsActual = rawNum(last.epsActual);
-      } catch { /* leave nulls */ }
+        const arr = await fetch(`https://financialmodelingprep.com/stable/earnings?symbol=${encodeURIComponent(s.ticker)}&apikey=${key}`).then((r) => (r.ok ? r.json() : null));
+        if (Array.isArray(arr) && arr.length) {
+          const sorted = arr.slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+          const pick = sorted.find((e) => new Date(e.date) >= t0) || sorted[sorted.length - 1];
+          base.nextEarnings = pick.date;
+          base.epsEstimate = pick.epsEstimated ?? null;
+          base.revEstimate = pick.revenueEstimated ?? null;
+          const lastRep = [...sorted].reverse().find((e) => e.epsActual != null);
+          if (lastRep) { base.lastEpsActual = lastRep.epsActual; base.lastEpsEstimate = lastRep.epsEstimated; }
+        }
+      } catch { /* fall through */ }
+      // 2) Yahoo fallback (all exchanges, but throttled) for anything FMP missed.
+      if (!base.nextEarnings) {
+        try {
+          const r = await cachedSummary(toYahoo(s.ticker), ["calendarEvents", "earningsHistory"]);
+          const ed = r.calendarEvents?.earnings?.earningsDate?.[0];
+          if (rawNum(ed)) base.nextEarnings = new Date(rawNum(ed) * 1000).toISOString().slice(0, 10);
+          const hist = r.earningsHistory?.history || [];
+          const last = hist[hist.length - 1] || {};
+          if (rawNum(last.epsActual) != null) { base.lastEpsActual = rawNum(last.epsActual); base.lastEpsEstimate = rawNum(last.epsEstimate); }
+        } catch { /* leave nulls */ }
+      }
       return base;
     });
     // Upcoming (today onward) ascending, then recently-reported descending,
     // then any with no date — so the soonest report is always at the top.
-    const t0 = new Date(); t0.setHours(0, 0, 0, 0);
     const ms = (d) => (d ? new Date(d).getTime() : null);
     rows.sort((a, b) => {
       const da = ms(a.nextEarnings), db = ms(b.nextEarnings);

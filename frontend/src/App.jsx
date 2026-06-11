@@ -1266,8 +1266,8 @@ function EarningsView({ token }) {
       {rows && rows.map((e,i)=>{
         const dd = days(e.nextEarnings);
         const upcoming = dd!=null && dd>=0;
-        const reported = e.epsActual!=null && e.epsEstimate!=null;
-        const beat = reported && e.epsActual>e.epsEstimate;
+        const hasLast = e.lastEpsActual!=null && e.lastEpsEstimate!=null;
+        const beat = hasLast && e.lastEpsActual>=e.lastEpsEstimate;
         return (
           <Card key={i} accent={upcoming && dd<=7}>
             <div className="flex items-center justify-between gap-2">
@@ -1287,12 +1287,14 @@ function EarningsView({ token }) {
                 </>) : <p className="text-[var(--muted)] text-xs">TBA</p>}
               </div>
             </div>
-            {reported && (
-              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[var(--border)] text-[11px]">
-                <span className="text-[var(--muted)]">Last EPS</span>
-                <span className="text-[var(--text)] font-bold">{fmtNum(e.epsActual)}</span>
-                <span className="text-[var(--muted)]">vs est {fmtNum(e.epsEstimate)}</span>
-                <Pill color={beat?"green":"red"} sm>{beat?"Beat":"Miss"}</Pill>
+            {(hasLast || (upcoming && e.epsEstimate!=null)) && (
+              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[var(--border)] text-[11px] flex-wrap">
+                {upcoming && e.epsEstimate!=null && (
+                  <><span className="text-[var(--muted)]">Est EPS</span><span className="text-[var(--text)] font-bold">{fmtNum(e.epsEstimate)}</span></>
+                )}
+                {hasLast && (
+                  <><span className="text-[var(--muted)]">{upcoming?"· Last":"Last EPS"}</span><span className="text-[var(--text)] font-bold">{fmtNum(e.lastEpsActual)}</span><span className="text-[var(--muted)]">vs {fmtNum(e.lastEpsEstimate)}</span><Pill color={beat?"green":"red"} sm>{beat?"Beat":"Miss"}</Pill></>
+                )}
               </div>
             )}
           </Card>
