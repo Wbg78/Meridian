@@ -325,23 +325,26 @@ async function getYahooCreds(force = false) {
   return _yc;
 }
 
-// Fetch quoteSummary modules for ONE symbol. Retries up to 3× across both
-// hosts, refreshing creds on auth/limit errors (Render's IP is flaky here).
+// Fetch quoteSummary modules for ONE symbol. Reuses the cached crumb and
+// only refreshes it ONCE on a 401 (so we don't hammer the crumb endpoint,
+// which is what Yahoo rate-limits hardest from datacenter IPs). Backs off
+// on 429/403. Alternates query1/query2 hosts.
 async function yahooQuoteSummary(yahooSym, modules) {
   const mod = modules.join(",");
-  let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let lastErr, refreshed = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const creds = await getYahooCreds(attempt > 0);
+      const creds = await getYahooCreds();
       const host = attempt % 2 ? YH2 : YH;
       const url = `${host}/v10/finance/quoteSummary/${encodeURIComponent(yahooSym)}?modules=${mod}&crumb=${encodeURIComponent(creds.crumb)}`;
       const r = await fetch(url, { headers: { ...YH_HEADERS, Cookie: creds.cookie } });
-      if (r.status === 401 || r.status === 429 || r.status === 403) { lastErr = new Error("qs " + r.status); await sleep(250 * (attempt + 1)); continue; }
+      if (r.status === 401 && !refreshed) { refreshed = true; await getYahooCreds(true); continue; }
+      if (r.status === 401 || r.status === 429 || r.status === 403) { lastErr = new Error("qs " + r.status); await sleep(500 * 2 ** attempt); continue; }
       if (!r.ok) throw new Error("quoteSummary " + r.status);
       const res = (await r.json())?.quoteSummary?.result?.[0];
       if (!res) throw new Error("no data");
       return res;
-    } catch (e) { lastErr = e; await sleep(250 * (attempt + 1)); }
+    } catch (e) { lastErr = e; await sleep(500 * 2 ** attempt); }
   }
   throw lastErr || new Error("quoteSummary failed");
 }
@@ -747,10 +750,12 @@ app.get("/api/screener", requireAuth, async (req, res) => {
 });
 
 // Market overview — indices, commodities, crypto (batched, one request).
-// Each entry: [yahooSymbol, label, tradingViewSymbol]
+// Each entry: [yahooSymbol, label, tradingViewSymbol]. TV symbols use the
+// freely-viewable OANDA CFD / TVC feeds (the real exchange index symbols
+// like SP:SPX are gated behind a paid TradingView subscription).
 const MARKET_GROUPS = {
-  indices: [["^GSPC", "S&P 500", "SP:SPX"], ["^IXIC", "Nasdaq", "NASDAQ:IXIC"], ["^DJI", "Dow Jones", "DJ:DJI"], ["^OMX", "OMXS30", "OMXSTO:OMXS30"], ["^GDAXI", "DAX", "XETR:DAX"], ["^FTSE", "FTSE 100", "TVC:UKX"], ["^VIX", "VIX", "TVC:VIX"]],
-  commodities: [["GC=F", "Gold", "TVC:GOLD"], ["CL=F", "Crude Oil", "TVC:USOIL"], ["BZ=F", "Brent", "TVC:UKOIL"], ["SI=F", "Silver", "TVC:SILVER"], ["NG=F", "Nat Gas", "NYMEX:NG1!"], ["HG=F", "Copper", "COMEX:HG1!"]],
+  indices: [["^GSPC", "S&P 500", "OANDA:SPX500USD"], ["^IXIC", "Nasdaq", "OANDA:NAS100USD"], ["^DJI", "Dow Jones", "OANDA:US30USD"], ["^OMX", "OMXS30", "OANDA:SE30SEK"], ["^GDAXI", "DAX", "OANDA:DE30EUR"], ["^FTSE", "FTSE 100", "OANDA:UK100GBP"], ["^VIX", "VIX", "TVC:VIX"]],
+  commodities: [["GC=F", "Gold", "TVC:GOLD"], ["CL=F", "Crude Oil", "TVC:USOIL"], ["BZ=F", "Brent", "TVC:UKOIL"], ["SI=F", "Silver", "TVC:SILVER"], ["NG=F", "Nat Gas", "OANDA:NATGASUSD"], ["HG=F", "Copper", "OANDA:XCUUSD"]],
   crypto: [["BTC-USD", "Bitcoin", "BINANCE:BTCUSDT"], ["ETH-USD", "Ethereum", "BINANCE:ETHUSDT"]],
   fx: [["USDSEK=X", "USD/SEK", "FX:USDSEK"], ["EURSEK=X", "EUR/SEK", "FX:EURSEK"]],
 };

@@ -391,7 +391,7 @@ function TVChart({ symbol, height = 380, resizable = false }) {
       style: "1",
       locale: "en",
       hide_side_toolbar: false,
-      allow_symbol_change: false,
+      allow_symbol_change: true,
       withdateranges: true,
       details: true,
       support_host: "https://www.tradingview.com",
@@ -479,7 +479,7 @@ function StockDetail({ ticker, token, onClose }) {
             </div>
             {chartMode==="tv" && data.tvSymbol ? (
               <>
-                <Card className="p-0 overflow-hidden"><TVChart symbol={data.tvSymbol} height={440} resizable /></Card>
+                <Card className="p-0 overflow-hidden"><TVChart symbol={data.tvSymbol} height={520} resizable /></Card>
                 <p className="text-[var(--muted)] text-[10px] -mt-2">Drag the bottom-right corner to resize · ⛶ for fullscreen</p>
               </>
             ) : (
@@ -665,23 +665,23 @@ function PortfolioView({ isOwner, token }) {
             <StatCard label="Total value" value={`${(analytics?.totalSEK ?? total).toLocaleString("sv-SE",{maximumFractionDigits:0})} kr`} />
             <StatCard label="Sharpe (1y)" value={analytics?.sharpe!=null?analytics.sharpe.toFixed(2):"…"} sub={analytics?.volatility!=null?`Volatility ${analytics.volatility}%`:"computing…"} trend={analytics?.sharpe>=1?"up":analytics?.sharpe<0?"down":undefined} />
           </div>
-          {analytics ? (
+          {analytics?.allocations ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest mb-2">Allocation by country</p>
-                {Object.entries(analytics.byCountry).map(([k,v])=>(
-                  <div key={k} className="mb-2">
-                    <div className="flex justify-between text-xs mb-0.5"><span className="text-[var(--text)]">{k}</span><span className="text-[var(--muted)]">{v}%</span></div>
-                    <Bar value={v} max={100} />
+                {(analytics.allocations.country||[]).map(a=>(
+                  <div key={a.key} className="mb-2">
+                    <div className="flex justify-between text-xs mb-0.5"><span className="text-[var(--text)]">{a.key}</span><span className="text-[var(--muted)]">{a.pct}%</span></div>
+                    <Bar value={a.pct} max={100} />
                   </div>
                 ))}
               </div>
               <div>
                 <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest mb-2">Allocation by sector</p>
-                {Object.entries(analytics.bySector).map(([k,v])=>(
-                  <div key={k} className="mb-2">
-                    <div className="flex justify-between text-xs mb-0.5"><span className="text-[var(--text)]">{k}</span><span className="text-[var(--muted)]">{v}%</span></div>
-                    <Bar value={v} max={50} color="bg-sky-500" />
+                {(analytics.allocations.sector||[]).map(a=>(
+                  <div key={a.key} className="mb-2">
+                    <div className="flex justify-between text-xs mb-0.5"><span className="text-[var(--text)]">{a.key}</span><span className="text-[var(--muted)]">{a.pct}%</span></div>
+                    <Bar value={a.pct} max={50} color="bg-sky-500" />
                   </div>
                 ))}
               </div>
