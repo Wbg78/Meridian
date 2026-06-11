@@ -71,22 +71,6 @@ const CAPITOL_FEED = [
   { name: "Marjorie Taylor Greene",ticker: "DUOL", action: "BUY",  amount: "$15K–$50K",   date: "May 25", party: "R" },
 ];
 
-const SCREENER_DATA = [
-  { ticker: "META",  pe: 24.1, eps: 19.2, rev: "+21%", mktcap: "1.3T", score: 92 },
-  { ticker: "AMZN",  pe: 41.3, eps: 4.1,  rev: "+13%", mktcap: "1.9T", score: 87 },
-  { ticker: "MSFT",  pe: 35.2, eps: 12.1, rev: "+17%", mktcap: "3.1T", score: 88 },
-  { ticker: "NVDA",  pe: 38.4, eps: 22.1, rev: "+94%", mktcap: "2.8T", score: 96 },
-  { ticker: "AMD",   pe: 48.7, eps: 2.1,  rev: "+9%",  mktcap: "246B", score: 74 },
-];
-
-const EARNINGS_DATA = [
-  { ticker: "GOOGL", name: "Alphabet",   date: "Jul 29", eps_est: 2.01, eps_act: 2.31, rev_est: "84.3B", rev_act: "89.2B", reaction: +5.8,  anomalies: ["Beat EPS by 15%", "Cloud revenue +29% vs 22% expected", "Buyback $70B announced"] },
-  { ticker: "PLTR",  name: "Palantir",   date: "Aug 4",  eps_est: 0.11, eps_act: null, rev_est: "872M",   rev_act: null,    reaction: null,  anomalies: ["Government revenue acceleration watch", "AIP bootcamp velocity"] },
-  { ticker: "LMND",  name: "Lemonade",   date: "Aug 6",  eps_est: -0.52,eps_act: -0.61,rev_est: "148M",   rev_act: "141M",  reaction: -12.4, anomalies: ["Missed revenue by 5%", "Loss ratio worsened QoQ", "Guidance cut"] },
-  { ticker: "HIMS",  name: "Hims & Hers",date: "Aug 11", eps_est: 0.18, eps_act: null, rev_est: "530M",   rev_act: null,    reaction: null,  anomalies: ["FDA ruling on GLP-1 compounding key catalyst"] },
-  { ticker: "DUOL",  name: "Duolingo",   date: "Aug 7",  eps_est: 0.44, eps_act: null, rev_est: "210M",   rev_act: null,    reaction: null,  anomalies: ["DAU growth rate will be key", "AI course launches"] },
-];
-
 const SENTIMENT_DATA = {
   fearGreed: 58,
   tickers: {
@@ -267,7 +251,20 @@ ETFs: ${MY_PORTFOLIO.etfs.map(e=>`${e.name} ${e.shares} shares`).join(", ")}`;
 
 // ─── VIEWS ─────────────────────────────────────────────────────
 
-function DashboardView({ isOwner }) {
+function DashboardView({ isOwner, token }) {
+  const [earnings, setEarnings] = useState(null);
+  useEffect(() => {
+    if (!token) return; let c = false;
+    const load = (t=0) => fetch(`${BACKEND_URL}/api/earnings`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => { if (!c) setEarnings(Array.isArray(d) ? d : []); })
+      .catch(() => { if (c) return; if (t < 3) setTimeout(() => load(t+1), 4000); else setEarnings([]); });
+    load();
+    return () => { c = true; };
+  }, [token]);
+  const earningsToday = new Date(); earningsToday.setHours(0,0,0,0);
+  const upcomingEarnings = (earnings || []).filter(e => e.nextEarnings && new Date(e.nextEarnings) >= earningsToday).slice(0,3);
+
   const stockValueSEK = MY_PORTFOLIO.stocks.reduce((s,p) => s + toSEK(p.price * p.shares, p.currency), 0);
   const fundValue     = MY_PORTFOLIO.funds.reduce((s,f) => s + f.value, 0);
   const etfValueSEK   = MY_PORTFOLIO.etfs.reduce((s,e) => s + toSEK(e.price * e.shares, e.currency), 0);
@@ -320,14 +317,16 @@ function DashboardView({ isOwner }) {
       <div>
         <SectionLabel>Upcoming Earnings</SectionLabel>
         <div className="space-y-2">
-          {EARNINGS_DATA.filter(e=>!e.eps_act).slice(0,3).map((e,i) => (
+          {!earnings && <Card><p className="text-[var(--muted)] text-xs">Loading earnings dates…</p></Card>}
+          {earnings && upcomingEarnings.length===0 && <Card><p className="text-[var(--muted)] text-xs">No upcoming earnings dates yet.</p></Card>}
+          {upcomingEarnings.map((e,i) => (
             <Card key={i}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--text)] font-bold">{e.ticker}</span>
-                  <Pill color="violet" sm>{e.date}</Pill>
+                  <Pill color="violet" sm>{new Date(e.nextEarnings).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</Pill>
                 </div>
-                <span className="text-[var(--muted)] text-xs">EPS est. {e.eps_est}</span>
+                <span className="text-[var(--muted)] text-xs">{e.epsEstimate!=null ? `EPS est. ${fmtNum(e.epsEstimate)}` : ""}</span>
               </div>
             </Card>
           ))}
@@ -1157,14 +1156,23 @@ function Movers({ token, onOpen }) {
       <div className="space-y-2">
         {(rows||[]).map((s,i) => (
           <Card key={i} className="cursor-pointer hover:border-violet-500/40 transition-colors">
-            <div onClick={()=>onOpen(s.ticker)} className="flex justify-between items-center">
-              <div>
-                <span className="text-[var(--text)] font-black text-sm">{s.ticker}</span>
-                <p className="text-[var(--muted)] text-xs truncate max-w-[180px]">{s.name}</p>
+            <div className="flex justify-between items-center gap-2">
+              <div onClick={()=>onOpen(s.ticker)} className="flex items-center gap-2 min-w-0 flex-1">
+                {s.logo && <img src={s.logo} alt="" className="w-7 h-7 rounded-lg object-contain bg-white border border-[var(--border)] flex-shrink-0" onError={e=>{e.currentTarget.style.display='none';}} />}
+                <div className="min-w-0">
+                  <span className="text-[var(--text)] font-black text-sm">{s.ticker}</span>
+                  <p className="text-[var(--muted)] text-xs truncate max-w-[180px]">{s.name}</p>
+                  {(s.industry || s.sector) && <p className="text-[var(--muted)] text-[10px] truncate max-w-[180px]">{s.industry || s.sector}</p>}
+                </div>
               </div>
-              <div className="text-right">
-                <p className="text-[var(--text)] text-sm font-bold">{s.price!=null?fmtNum(s.price):"—"}</p>
-                <ChangePill v={s.change} />
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <a href={`https://news.google.com/search?q=${encodeURIComponent(s.ticker + " stock")}&hl=en-US&gl=US&ceid=US:en`}
+                  target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()}
+                  className="text-[var(--muted)] hover:text-violet-400 text-sm" title={`News for ${s.ticker}`}>📰</a>
+                <div onClick={()=>onOpen(s.ticker)} className="text-right">
+                  <p className="text-[var(--text)] text-sm font-bold">{s.price!=null?fmtNum(s.price):"—"}</p>
+                  <ChangePill v={s.change} />
+                </div>
               </div>
             </div>
           </Card>

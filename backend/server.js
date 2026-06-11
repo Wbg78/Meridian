@@ -829,24 +829,48 @@ app.get("/api/earnings", requireAuth, async (req, res) => {
 // Screener — top movers from Financial Modeling Prep (free /stable API).
 // Key-based, so it works from any server IP (unlike Finviz scraping).
 //   ?view=topgainers (default) | losers | mostactive
+// Each row is enriched with a company logo (FMP's free image CDN — no extra
+// call, same trick /api/capitol uses) and sector/industry (Yahoo
+// quoteSummary, same source as /api/stock/:ticker, pooled + cached).
+// The whole response is cached for 10min per view since the per-symbol
+// profile lookups are the slow part.
+const _screenerCache = {};
+const SCREENER_TTL = 10 * 60_000;
 app.get("/api/screener", requireAuth, async (req, res) => {
   const key = process.env.FMP_API_KEY;
   if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
   try {
     const map = { topgainers: "biggest-gainers", losers: "biggest-losers", mostactive: "most-actives" };
-    const endpoint = map[req.query.view] || "biggest-gainers";
+    const view = map[req.query.view] ? req.query.view : "topgainers";
+    const endpoint = map[view];
+    const cached = _screenerCache[view];
+    if (cached && Date.now() - cached.at < SCREENER_TTL) return res.json(cached.data);
     const r = await fetch(`https://financialmodelingprep.com/stable/${endpoint}?apikey=${key}`);
     if (!r.ok) throw new Error("fmp " + r.status);
     const data = await r.json();
     if (!Array.isArray(data)) throw new Error(data?.["Error Message"] || "unexpected response");
-    const rows = data.slice(0, 20).map((d) => ({
-      ticker: d.symbol,
-      name: d.name || d.symbol,
-      price: d.price ?? null,
-      change: d.changesPercentage ?? null,   // already a percent
-      exchange: d.exchange || null,
-    }));
-    res.json({ rows, source: "financialmodelingprep" });
+    const rows = await pooled(data.slice(0, 20), 3, async (d) => {
+      const row = {
+        ticker: d.symbol,
+        name: d.name || d.symbol,
+        price: d.price ?? null,
+        change: d.changesPercentage ?? null,   // already a percent
+        exchange: d.exchange || null,
+        logo: d.symbol ? `https://financialmodelingprep.com/image-stock/${d.symbol}.png` : null,
+        sector: null,
+        industry: null,
+      };
+      try {
+        const prof = await cachedSummary(toYahoo(d.symbol), ["summaryProfile"]);
+        const sp = prof.summaryProfile || {};
+        row.sector = sp.sector || null;
+        row.industry = sp.industry || null;
+      } catch { /* leave nulls */ }
+      return row;
+    });
+    const payload = { rows, source: "financialmodelingprep" };
+    _screenerCache[view] = { at: Date.now(), data: payload };
+    res.json(payload);
   } catch (e) {
     res.status(502).json({ error: "Screener unavailable: " + String(e) });
   }
