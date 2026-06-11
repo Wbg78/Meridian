@@ -1197,75 +1197,108 @@ function ScreenerView({ token }) {
   );
 }
 
+function CapitolRow({ c }) {
+  const [imgOk, setImgOk] = useState(true);
+  const ring = c.party==="D"?"bg-sky-500/15 text-sky-400":c.party==="R"?"bg-red-500/15 text-red-400":"bg-violet-500/15 text-violet-400";
+  const pcol = c.party==="D"?"text-sky-400":c.party==="R"?"text-red-400":"text-violet-400";
+  const initials = (c.name||"").split(" ").map(w=>w[0]).slice(0,2).join("").toUpperCase();
+  const meta = [c.party, c.state, c.role || c.chamber].filter(Boolean).join(" · ");
+  return (
+    <Card>
+      <div className="flex items-center gap-3">
+        {c.photo && imgOk ? (
+          <a href={c.profileUrl||undefined} target="_blank" rel="noreferrer" className="flex-shrink-0">
+            <img src={c.photo} onError={()=>setImgOk(false)} alt={c.name} className="w-10 h-12 rounded-lg object-cover object-top bg-[var(--card)] border border-[var(--border)]" />
+          </a>
+        ) : (
+          <div className={`w-10 h-12 rounded-lg flex items-center justify-center text-xs font-black flex-shrink-0 ${ring}`}>{initials}</div>
+        )}
+        <div className="flex-1 min-w-0">
+          <a href={c.profileUrl||undefined} target="_blank" rel="noreferrer" className="block">
+            <p className="text-[var(--text)] text-sm font-semibold truncate hover:text-violet-400">{c.name}</p>
+          </a>
+          <p className="text-[var(--muted)] text-[11px] truncate"><span className={pcol}>{c.party||""}</span>{c.party&&(c.state||c.role)?" · ":""}{[c.state, c.role||c.chamber].filter(Boolean).join(" · ")}</p>
+          <div className="flex items-center gap-1.5 mt-1">
+            {c.logo && <img src={c.logo} alt="" className="w-4 h-4 rounded-sm object-contain bg-white" onError={e=>{e.currentTarget.style.display='none';}} />}
+            <span className="text-[var(--text)] text-xs font-bold">{c.ticker}</span>
+            <span className="text-[var(--muted)] text-[11px] truncate">· {c.amount} · {c.date}</span>
+          </div>
+        </div>
+        <Pill color={c.action==="BUY"?"green":c.action==="SELL"?"red":"violet"} sm>{c.action}</Pill>
+      </div>
+    </Card>
+  );
+}
+
 function CapitolView() {
   return (
     <div className="space-y-3">
       <Card className="border-amber-500/20 bg-amber-500/5">
-        <p className="text-amber-400 text-xs font-semibold">📡 Congressional STOCK Act disclosures · up to 45 days after trade</p>
+        <p className="text-amber-400 text-xs font-semibold">📡 US Senate &amp; House STOCK Act disclosures · tap a member for their official profile</p>
       </Card>
-      {CAPITOL_FEED.map((c,i) => (
-        <Card key={i}>
-          <div className="flex items-center gap-3">
-            <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0 ${c.party==="D"?"bg-sky-500/15 text-sky-400":c.party==="R"?"bg-red-500/15 text-red-400":"bg-violet-500/15 text-violet-400"}`}>{c.party || (c.chamber||"·")[0]}</div>
-            <div className="flex-1 min-w-0">
-              <p className="text-[var(--text)] text-sm font-semibold truncate">{c.name}{c.chamber?<span className="text-[var(--muted)] font-normal"> · {c.chamber}</span>:null}</p>
-              <p className="text-[var(--muted)] text-xs truncate">{c.ticker} · {c.amount} · {c.date}</p>
-            </div>
-            <Pill color={c.action==="BUY"?"green":"red"} sm>{c.action}</Pill>
-          </div>
-        </Card>
-      ))}
+      {CAPITOL_FEED.map((c,i) => <CapitolRow key={i} c={c} />)}
+      {CAPITOL_FEED.length===0 && <Card><p className="text-[var(--muted)] text-sm">Loading congressional trades…</p></Card>}
     </div>
   );
 }
 
-function EarningsView() {
+function EarningsView({ token }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(false);
+  useEffect(()=>{
+    if(!token) return; let c=false; setErr(false);
+    const load=(t=0)=>fetch(`${BACKEND_URL}/api/earnings`,{headers:{Authorization:`Bearer ${token}`}})
+      .then(r=>r.ok?r.json():Promise.reject()).then(d=>{ if(!c) setRows(Array.isArray(d)?d:[]); })
+      .catch(()=>{ if(c)return; if(t<3) setTimeout(()=>load(t+1),4000); else setErr(true); });
+    load();
+    return ()=>{c=true;};
+  },[token]);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const days = d => d ? Math.round((new Date(d)-today)/86400000) : null;
   return (
-    <div className="space-y-4">
-      <SectionLabel>Earnings — Your Positions</SectionLabel>
-      {EARNINGS_DATA.map((e,i) => {
-        const reported = !!e.eps_act;
-        const beat     = reported && e.eps_act > e.eps_est;
+    <div className="space-y-3">
+      <div className="flex justify-between items-center gap-2">
+        <SectionLabel>Earnings — your positions</SectionLabel>
+        <a href="https://www.tradingview.com/markets/stocks-usa/earnings/" target="_blank" rel="noreferrer" className="text-violet-400 text-xs font-bold border border-violet-500/25 rounded-xl px-3 py-1 bg-violet-500/5 whitespace-nowrap mb-3">See full calendar →</a>
+      </div>
+      {err && <Card><p className="text-red-400 text-sm">Couldn't load earnings — the backend may be waking up. Reopen this tab in ~30s.</p></Card>}
+      {!rows && !err && <Card><p className="text-[var(--muted)] text-sm">Loading earnings dates…</p></Card>}
+      {rows && rows.map((e,i)=>{
+        const dd = days(e.nextEarnings);
+        const upcoming = dd!=null && dd>=0;
+        const reported = e.epsActual!=null && e.epsEstimate!=null;
+        const beat = reported && e.epsActual>e.epsEstimate;
         return (
-          <Card key={i} accent={reported && beat}>
-            <div className="flex items-start justify-between mb-3">
-              <div>
+          <Card key={i} accent={upcoming && dd<=7}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-[var(--text)] font-black">{e.ticker}</span>
-                  <span className="text-[var(--muted)] text-xs">{e.name}</span>
-                  <Pill color={reported?(beat?"green":"red"):"violet"} sm>{reported?"Reported":e.date}</Pill>
+                  <span className="text-[var(--text)] font-black text-sm">{e.ticker}</span>
+                  <span className="text-[var(--muted)] text-xs truncate">{e.name}</span>
                 </div>
+                {e.sector && <p className="text-[var(--muted)] text-[11px] mt-0.5">{e.sector}</p>}
               </div>
-              {e.reaction !== null && (
-                <Pill color={e.reaction>=0?"green":"red"} sm>{e.reaction>=0?"+":""}{e.reaction}%</Pill>
-              )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div className="bg-[var(--bg)] rounded-xl p-2.5">
-                <p className="text-[var(--muted)] text-[10px] uppercase tracking-wide mb-1">EPS</p>
-                <p className="text-[var(--text)] text-xs">Est: <span className="font-bold">{e.eps_est}</span></p>
-                {e.eps_act && <p className={`text-xs font-bold ${beat?"text-emerald-400":"text-red-400"}`}>Act: {e.eps_act} {beat?"▲ Beat":"▼ Miss"}</p>}
-              </div>
-              <div className="bg-[var(--bg)] rounded-xl p-2.5">
-                <p className="text-[var(--muted)] text-[10px] uppercase tracking-wide mb-1">Revenue</p>
-                <p className="text-[var(--text)] text-xs">Est: <span className="font-bold">{e.rev_est}</span></p>
-                {e.rev_act && <p className="text-xs font-bold text-[var(--text)]">Act: {e.rev_act}</p>}
+              <div className="text-right flex-shrink-0">
+                {e.nextEarnings ? (<>
+                  <p className="text-[var(--text)] text-xs font-bold">{e.nextEarnings}</p>
+                  <p className={`text-[10px] font-semibold ${upcoming?(dd<=7?"text-amber-400":"text-violet-400"):"text-[var(--muted)]"}`}>
+                    {upcoming ? (dd===0?"Today":`in ${dd} day${dd===1?"":"s"}`) : `reported ${-dd}d ago`}
+                  </p>
+                </>) : <p className="text-[var(--muted)] text-xs">TBA</p>}
               </div>
             </div>
-
-            <div className="space-y-1">
-              <p className="text-[var(--muted)] text-[10px] uppercase tracking-wide font-semibold">{reported?"Market Anomalies":"Watch"}</p>
-              {e.anomalies.map((a,j) => (
-                <div key={j} className="flex items-start gap-1.5">
-                  <span className="text-violet-400 text-[10px] mt-0.5">◆</span>
-                  <p className="text-[var(--text)] text-xs">{a}</p>
-                </div>
-              ))}
-            </div>
+            {reported && (
+              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-[var(--border)] text-[11px]">
+                <span className="text-[var(--muted)]">Last EPS</span>
+                <span className="text-[var(--text)] font-bold">{fmtNum(e.epsActual)}</span>
+                <span className="text-[var(--muted)]">vs est {fmtNum(e.epsEstimate)}</span>
+                <Pill color={beat?"green":"red"} sm>{beat?"Beat":"Miss"}</Pill>
+              </div>
+            )}
           </Card>
         );
       })}
+      {rows && rows.length===0 && <Card><p className="text-[var(--muted)] text-sm">No earnings data available yet.</p></Card>}
     </div>
   );
 }

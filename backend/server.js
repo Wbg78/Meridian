@@ -351,12 +351,13 @@ async function yahooQuoteSummary(yahooSym, modules) {
 
 // Cache full quoteSummary results per symbol (30 min) so once we get a
 // good fetch through Render's flaky path, the detail page stays populated.
-const _detailCache = new Map(); // yahooSym -> { at, res }
+const _detailCache = new Map(); // "sym::modules" -> { at, res }
 async function cachedSummary(sym, modules) {
-  const c = _detailCache.get(sym);
+  const k = sym + "::" + modules.join(",");
+  const c = _detailCache.get(k);
   if (c && Date.now() - c.at < 30 * 60_000) return c.res;
   const res = await yahooQuoteSummary(sym, modules);
-  _detailCache.set(sym, { at: Date.now(), res });
+  _detailCache.set(k, { at: Date.now(), res });
   return res;
 }
 
@@ -687,39 +688,122 @@ app.get("/api/sentiment", requireAuth, async (req, res) => {
   }
 });
 
-// Congressional trades — US Senate + House STOCK Act disclosures, via
-// Financial Modeling Prep's free /stable API (key-based, server-friendly).
+// Map of US legislators (name -> party/state/role/bioguide) from the free
+// @unitedstates dataset, cached 24h. Lets us attach photos + bios to trades.
+let _legCache = { at: 0, map: null };
+async function legislatorsMap() {
+  if (_legCache.map && Date.now() - _legCache.at < 24 * 3600_000) return _legCache.map;
+  const map = new Map(); // lastNameLower -> [{ bioguide, party, state, type, first, nickname }]
+  try {
+    const r = await fetch("https://unitedstates.github.io/congress-legislators/legislators-current.json", { headers: YH_HEADERS });
+    const arr = await r.json();
+    for (const p of arr) {
+      const t = p.terms?.[p.terms.length - 1] || {};
+      const last = (p.name?.last || "").toLowerCase();
+      if (!last) continue;
+      if (!map.has(last)) map.set(last, []);
+      map.get(last).push({
+        bioguide: p.id?.bioguide || null,
+        party: (t.party || "")[0]?.toUpperCase() || "",   // D / R / I
+        state: t.state || "",
+        type: t.type,                                       // sen / rep
+        first: (p.name?.first || "").toLowerCase(),
+        nickname: (p.name?.nickname || "").toLowerCase(),
+      });
+    }
+    _legCache = { at: Date.now(), map };
+  } catch { /* leave whatever we have */ }
+  return map;
+}
+function matchLegislator(map, firstName, lastName) {
+  const list = map.get((lastName || "").toLowerCase());
+  if (!list || !list.length) return null;
+  if (list.length === 1) return list[0];
+  const f = (firstName || "").toLowerCase();
+  return list.find((e) => e.first === f || e.nickname === f || (f && e.first.startsWith(f[0]))) || list[0];
+}
+
+// Congressional trades — US Senate + House STOCK Act disclosures (FMP),
+// enriched with senator photo + party/state/role + company logo. Cached 4h.
+let _capCache = { at: 0, data: null };
 app.get("/api/capitol", requireAuth, async (req, res) => {
   const key = process.env.FMP_API_KEY;
   if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
   try {
-    const [sen, house] = await Promise.allSettled([
-      fetch(`https://financialmodelingprep.com/stable/senate-latest?apikey=${key}`).then((r) => r.json()),
-      fetch(`https://financialmodelingprep.com/stable/house-latest?apikey=${key}`).then((r) => r.json()),
+    if (_capCache.data && Date.now() - _capCache.at < 4 * 3600_000) return res.json(_capCache.data);
+    const [sen, house, map] = await Promise.all([
+      fetch(`https://financialmodelingprep.com/stable/senate-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
+      fetch(`https://financialmodelingprep.com/stable/house-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
+      legislatorsMap(),
     ]);
-    const norm = (arr, chamber) => (Array.isArray(arr) ? arr : []).map((t) => ({
-      name: `${t.firstName || ""} ${t.lastName || ""}`.trim() || t.office || "Unknown",
-      chamber,
-      party: "",   // FMP doesn't expose party; frontend falls back to chamber.
-      ticker: t.symbol || "—",
-      action: /sale|sold/i.test(t.type || "") ? "SELL"
-            : /purchase|buy/i.test(t.type || "") ? "BUY"
-            : (t.type || "—"),
-      amount: t.amount || "—",
-      date: t.transactionDate || t.disclosureDate || null,
-      asset: t.assetDescription || "",
-    }));
-    const feed = [
-      ...(sen.status === "fulfilled" ? norm(sen.value, "Senate") : []),
-      ...(house.status === "fulfilled" ? norm(house.value, "House") : []),
-    ]
+    const norm = (arr, chamber) => (Array.isArray(arr) ? arr : []).map((t) => {
+      const leg = matchLegislator(map, t.firstName, t.lastName);
+      const bioguide = t.senateID || leg?.bioguide || null;
+      return {
+        name: `${t.firstName || ""} ${t.lastName || ""}`.trim() || t.office || "Unknown",
+        chamber,
+        party: leg?.party || "",
+        state: leg?.state || t.district || "",
+        role: leg ? (leg.type === "sen" ? "Senator" : "Representative") : chamber.replace(/s$/, ""),
+        photo: bioguide ? `https://unitedstates.github.io/images/congress/225x275/${bioguide}.jpg` : null,
+        profileUrl: bioguide ? `https://bioguide.congress.gov/search/bio/${bioguide}` : null,
+        ticker: t.symbol || "—",
+        logo: t.symbol ? `https://financialmodelingprep.com/image-stock/${t.symbol}.png` : null,
+        action: /sale|sold/i.test(t.type || "") ? "SELL"
+              : /purchase|buy/i.test(t.type || "") ? "BUY"
+              : (t.type || "—"),
+        amount: t.amount || "—",
+        date: t.transactionDate || t.disclosureDate || null,
+        asset: t.assetDescription || "",
+      };
+    });
+    const feed = [...norm(sen, "Senate"), ...norm(house, "House")]
       .filter((x) => x.date)
       .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 30);
+      .slice(0, 80);
     if (!feed.length) throw new Error("no disclosures returned");
+    _capCache = { at: Date.now(), data: feed };
     res.json(feed);
   } catch (e) {
     res.status(502).json({ error: "Congress trades unavailable: " + String(e) });
+  }
+});
+
+// Upcoming earnings for your holdings, soonest first. Date + last EPS
+// beat/miss from Yahoo's calendar/earnings modules. Cached 6h.
+let _earnCache = { at: 0, data: null };
+app.get("/api/earnings", requireAuth, async (req, res) => {
+  try {
+    if (_earnCache.data && Date.now() - _earnCache.at < 6 * 3600_000) return res.json(_earnCache.data);
+    const rows = await pooled(HOLDINGS.stocks, 3, async (s) => {
+      const base = { ticker: s.ticker, name: s.name, sector: s.sector || null, tvSymbol: toTradingView(s.ticker), nextEarnings: null, epsEstimate: null, epsActual: null };
+      try {
+        const r = await cachedSummary(toYahoo(s.ticker), ["calendarEvents", "earningsHistory"]);
+        const ed = r.calendarEvents?.earnings?.earningsDate?.[0];
+        if (rawNum(ed)) base.nextEarnings = new Date(rawNum(ed) * 1000).toISOString().slice(0, 10);
+        const hist = r.earningsHistory?.history || [];
+        const last = hist[hist.length - 1] || {};
+        base.epsEstimate = rawNum(last.epsEstimate);
+        base.epsActual = rawNum(last.epsActual);
+      } catch { /* leave nulls */ }
+      return base;
+    });
+    // Upcoming (today onward) ascending, then recently-reported descending,
+    // then any with no date — so the soonest report is always at the top.
+    const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+    const ms = (d) => (d ? new Date(d).getTime() : null);
+    rows.sort((a, b) => {
+      const da = ms(a.nextEarnings), db = ms(b.nextEarnings);
+      const ga = da == null ? 2 : (da >= t0.getTime() ? 0 : 1);
+      const gb = db == null ? 2 : (db >= t0.getTime() ? 0 : 1);
+      if (ga !== gb) return ga - gb;
+      if (da == null) return 0;
+      return ga === 0 ? da - db : db - da;
+    });
+    _earnCache = { at: Date.now(), data: rows };
+    res.json(rows);
+  } catch (e) {
+    res.status(502).json({ error: "Earnings unavailable: " + String(e) });
   }
 });
 
