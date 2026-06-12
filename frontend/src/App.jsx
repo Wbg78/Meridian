@@ -323,6 +323,7 @@ function DashboardView({ isOwner, token }) {
             <Card key={i}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
+                  {e.logo && <img src={e.logo} alt="" className="w-6 h-6 rounded-lg object-contain bg-white/5 flex-shrink-0" onError={(ev)=>{ev.target.style.display="none";}} />}
                   <span className="text-[var(--text)] font-bold">{e.ticker}</span>
                   <Pill color="violet" sm>{new Date(e.nextEarnings).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</Pill>
                 </div>
@@ -712,7 +713,7 @@ function GlossaryItem({ item }) {
   );
 }
 
-const COUNTRY_NAME = { SE:"Sweden", US:"United States", FR:"France", DK:"Denmark", IN:"India", DE:"Germany", GB:"United Kingdom", NO:"Norway", FI:"Finland", NL:"Netherlands", CH:"Switzerland", Global:"global markets", Asia:"Asia" };
+const COUNTRY_NAME = { SE:"Sweden", US:"United States", FR:"France", DK:"Denmark", IN:"India", DE:"Germany", GB:"United Kingdom", NO:"Norway", FI:"Finland", NL:"Netherlands", CH:"Switzerland", Global:"global markets", Asia:"Asia", JP:"Japan", CN:"China", TW:"Taiwan", KR:"South Korea", HK:"Hong Kong", SG:"Singapore", CA:"Canada", Other:"Other markets" };
 function sliceLabel(dim, key) { return dim==="country" ? (COUNTRY_NAME[key]||key) : key; }
 function sliceNewsQuery(dim, key) {
   if (dim==="country") return `${COUNTRY_NAME[key]||key} stock market economy`;
@@ -1303,7 +1304,7 @@ function ScreenerView({ token }) {
       {sub==="market"  && <MarketOverview token={token} />}
       {sub==="search"  && <TickerSearch token={token} onOpen={setSelected} />}
       {sub==="movers"  && <Movers token={token} onOpen={setSelected} />}
-      {sub==="capitol" && <CapitolView />}
+      {sub==="capitol" && <CapitolView token={token} />}
       {selected && <StockDetail ticker={selected} token={token} onClose={()=>setSelected(null)} />}
     </div>
   );
@@ -1342,14 +1343,87 @@ function CapitolRow({ c }) {
   );
 }
 
-function CapitolView() {
+// Aggregate "Analyse Activity" view for one ticker — shows buy/sell counts,
+// a lean verdict, party breakdown and the individual trades behind it.
+function CapitolAnalysisModal({ symbol, token, onClose }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    let c = false;
+    fetch(`${BACKEND_URL}/api/capitol/analyze?symbol=${encodeURIComponent(symbol)}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setData(d); }).catch(() => { if (!c) setErr(true); });
+    return () => { c = true; };
+  }, [symbol]);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 max-w-md w-full max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-3">
+          <div className="flex items-center gap-2">
+            {data?.logo && <img src={data.logo} alt="" className="w-7 h-7 rounded-lg object-contain bg-white/5" onError={e=>{e.currentTarget.style.display='none';}} />}
+            <h3 className="text-[var(--text)] font-black text-lg">{symbol} — Activity</h3>
+          </div>
+          <button onClick={onClose} className="text-[var(--muted)] text-xl leading-none">×</button>
+        </div>
+        {err && <p className="text-red-400 text-sm">Couldn't load analysis.</p>}
+        {!data && !err && <p className="text-[var(--muted)] text-sm">Crunching congressional trades…</p>}
+        {data && (
+          <div className="space-y-3">
+            <Card accent>
+              <p className="text-[var(--text)] font-bold text-sm">{data.lean}</p>
+              <p className="text-[var(--muted)] text-xs mt-1">{data.totalTrades} disclosure{data.totalTrades===1?"":"s"} · {data.buys} buy{data.buys===1?"":"s"} / {data.sells} sell{data.sells===1?"":"s"}</p>
+            </Card>
+            {Object.keys(data.byParty).length > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {Object.entries(data.byParty).map(([p, v]) => (
+                  <Pill key={p} color={p==="D"?"sky":p==="R"?"red":"violet"} sm>{p}: {v.buys}B / {v.sells}S</Pill>
+                ))}
+              </div>
+            )}
+            {data.members.length > 0 && (
+              <div>
+                <p className="text-[var(--muted)] text-[11px] uppercase tracking-widest mb-1.5">Members involved</p>
+                <div className="space-y-1.5">
+                  {data.members.map((m,i) => (
+                    <div key={i} className="flex justify-between items-center text-xs gap-2">
+                      <span className="text-[var(--text)] font-semibold truncate">{m.name} <span className="text-[var(--muted)]">({m.party}{m.chamber?` · ${m.chamber}`:""})</span></span>
+                      <span className="text-[var(--muted)]">{m.buys}B / {m.sells}S</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {data.totalTrades === 0 && <p className="text-[var(--muted)] text-sm">No recent disclosures for {symbol} in the available window.</p>}
+            <p className="text-[var(--muted)] text-[10px] pt-1 border-t border-[var(--border)]">{data.windowNote}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CapitolView({ token }) {
+  const [analyzeSym, setAnalyzeSym] = useState("");
+  const [openSym, setOpenSym] = useState(null);
   return (
     <div className="space-y-3">
       <Card className="border-amber-500/20 bg-amber-500/5">
         <p className="text-amber-400 text-xs font-semibold">📡 US Senate &amp; House STOCK Act disclosures · tap a member for their official profile</p>
       </Card>
-      {CAPITOL_FEED.map((c,i) => <CapitolRow key={i} c={c} />)}
+      <Card>
+        <p className="text-[var(--muted)] text-[11px] uppercase tracking-widest mb-2">Analyse activity</p>
+        <form className="flex gap-2" onSubmit={e=>{e.preventDefault(); const s=analyzeSym.trim().toUpperCase(); if(s) setOpenSym(s);}}>
+          <input value={analyzeSym} onChange={e=>setAnalyzeSym(e.target.value)} placeholder="Ticker, e.g. NVDA"
+            className="flex-1 bg-[var(--bg)] border border-[var(--border)] rounded-xl px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-violet-500/40" />
+          <button type="submit" className="px-3 py-2 rounded-xl text-xs font-bold bg-violet-500/15 text-violet-400 border border-violet-500/25">Analyse</button>
+        </form>
+      </Card>
+      {CAPITOL_FEED.map((c,i) => (
+        <div key={i} onClick={()=>c.ticker && c.ticker!=="—" && setOpenSym(c.ticker)} className={c.ticker && c.ticker!=="—" ? "cursor-pointer" : ""}>
+          <CapitolRow c={c} />
+        </div>
+      ))}
       {CAPITOL_FEED.length===0 && <Card><p className="text-[var(--muted)] text-sm">Loading congressional trades…</p></Card>}
+      {openSym && <CapitolAnalysisModal symbol={openSym} token={token} onClose={()=>setOpenSym(null)} />}
     </div>
   );
 }
@@ -1383,12 +1457,19 @@ function EarningsView({ token }) {
         return (
           <Card key={i} accent={upcoming && dd<=7}>
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-[var(--text)] font-black text-sm">{e.ticker}</span>
-                  <span className="text-[var(--muted)] text-xs truncate">{e.name}</span>
+              <div className="min-w-0 flex items-center gap-2">
+                {e.logo && <img src={e.logo} alt="" className="w-7 h-7 rounded-lg object-contain bg-white/5 flex-shrink-0" onError={(ev)=>{ev.target.style.display="none";}} />}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[var(--text)] font-black text-sm">{e.ticker}</span>
+                    {e.irUrl ? (
+                      <a href={e.irUrl} target="_blank" rel="noreferrer" onClick={(ev)=>ev.stopPropagation()} className="text-[var(--muted)] text-xs truncate hover:text-violet-400 hover:underline">{e.name}</a>
+                    ) : (
+                      <span className="text-[var(--muted)] text-xs truncate">{e.name}</span>
+                    )}
+                  </div>
+                  {e.sector && <p className="text-[var(--muted)] text-[11px] mt-0.5">{e.sector}</p>}
                 </div>
-                {e.sector && <p className="text-[var(--muted)] text-[11px] mt-0.5">{e.sector}</p>}
               </div>
               <div className="text-right flex-shrink-0">
                 {e.nextEarnings ? (<>

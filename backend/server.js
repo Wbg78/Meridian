@@ -138,11 +138,17 @@ const HOLDINGS = {
   // are best-effort tags (from the fund's mandate) for the allocation views.
   funds: [
     { ticker: "AMF-LANG",  name: "AMF Räntefond Lång",          value: 5172,  gainPct: 3.43,  country: "SE",     region: "Europe", sector: "Bonds" },
-    { ticker: "AVZ-GLO",   name: "Avanza Global",               value: 50191, gainPct: 18.17, country: "Global", region: "Global", sector: "Index Fund" },
+    // countryWeights: best-effort breakdown of the fund's actual underlying
+    // geography (from its fact sheet), used so "Allocation by country" shows
+    // where the money is actually invested rather than lumping it into
+    // "Global"/"Asia". Approximate, refresh periodically.
+    { ticker: "AVZ-GLO",   name: "Avanza Global",               value: 50191, gainPct: 18.17, country: "Global", region: "Global", sector: "Index Fund",
+      countryWeights: { US: 73, JP: 6.7, GB: 4, Other: 16.3 } },
     { ticker: "AVZ-USA",   name: "Avanza USA",                  value: 4703,  gainPct: 49.32, country: "US",     region: "North America", sector: "Index Fund" },
     { ticker: "AVZ-ZERO",  name: "Avanza Zero",                 value: 22374, gainPct: 13.40, country: "SE",     region: "Europe", sector: "Index Fund" },
     { ticker: "PLUS-FAST", name: "PLUS Fastigheter Sverige",    value: 1309,  gainPct: -6.49, country: "SE",     region: "Europe", sector: "Real Estate" },
-    { ticker: "SWB-ASIEN", name: "Swedbank Robur Access Asien", value: 32648, gainPct: 29.56, country: "Asia",   region: "Asia",   sector: "Index Fund" },
+    { ticker: "SWB-ASIEN", name: "Swedbank Robur Access Asien", value: 32648, gainPct: 29.56, country: "Asia",   region: "Asia",   sector: "Index Fund",
+      countryWeights: { CN: 27, TW: 19, IN: 18, KR: 12, HK: 6, SG: 4, Other: 14 } },
   ],
 };
 
@@ -826,47 +832,100 @@ function matchLegislator(map, firstName, lastName) {
 
 // Congressional trades — US Senate + House STOCK Act disclosures (FMP),
 // enriched with senator photo + party/state/role + company logo. Cached 4h.
-let _capCache = { at: 0, data: null };
-app.get("/api/capitol", requireAuth, async (req, res) => {
+let _capCache = { at: 0, full: null };
+// Fetches + normalises the latest congressional disclosures (sorted, newest
+// first). FMP's free tier only exposes the latest page (~100 senate + ~100
+// house), so this ~200-record window is the full pool we have to work with —
+// both /api/capitol (top 80) and /api/capitol/analyze (per-ticker) share it.
+async function getCapitolFeed() {
+  if (_capCache.full && Date.now() - _capCache.at < 4 * 3600_000) return _capCache.full;
   const key = process.env.FMP_API_KEY;
-  if (!key) return res.status(503).json({ error: "FMP_API_KEY not set on server." });
+  if (!key) throw new Error("FMP_API_KEY not set on server.");
+  const [sen, house, map] = await Promise.all([
+    fetch(`https://financialmodelingprep.com/stable/senate-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
+    fetch(`https://financialmodelingprep.com/stable/house-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
+    legislatorsMap(),
+  ]);
+  const norm = (arr, chamber) => (Array.isArray(arr) ? arr : []).map((t) => {
+    const leg = matchLegislator(map, t.firstName, t.lastName);
+    const bioguide = t.senateID || leg?.bioguide || null;
+    return {
+      name: `${t.firstName || ""} ${t.lastName || ""}`.trim() || t.office || "Unknown",
+      chamber,
+      party: leg?.party || "",
+      state: leg?.state || t.district || "",
+      role: leg ? (leg.type === "sen" ? "Senator" : "Representative") : chamber.replace(/s$/, ""),
+      photo: bioguide ? `https://unitedstates.github.io/images/congress/225x275/${bioguide}.jpg` : null,
+      profileUrl: bioguide ? `https://bioguide.congress.gov/search/bio/${bioguide}` : null,
+      ticker: t.symbol || "—",
+      logo: t.symbol ? `https://financialmodelingprep.com/image-stock/${t.symbol}.png` : null,
+      action: /sale|sold/i.test(t.type || "") ? "SELL"
+            : /purchase|buy/i.test(t.type || "") ? "BUY"
+            : (t.type || "—"),
+      amount: t.amount || "—",
+      date: t.transactionDate || t.disclosureDate || null,
+      asset: t.assetDescription || "",
+    };
+  });
+  const feed = [...norm(sen, "Senate"), ...norm(house, "House")]
+    .filter((x) => x.date)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (!feed.length) throw new Error("no disclosures returned");
+  _capCache = { at: Date.now(), full: feed };
+  return feed;
+}
+
+app.get("/api/capitol", requireAuth, async (req, res) => {
   try {
-    if (_capCache.data && Date.now() - _capCache.at < 4 * 3600_000) return res.json(_capCache.data);
-    const [sen, house, map] = await Promise.all([
-      fetch(`https://financialmodelingprep.com/stable/senate-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
-      fetch(`https://financialmodelingprep.com/stable/house-latest?apikey=${key}`).then((r) => r.json()).catch(() => []),
-      legislatorsMap(),
-    ]);
-    const norm = (arr, chamber) => (Array.isArray(arr) ? arr : []).map((t) => {
-      const leg = matchLegislator(map, t.firstName, t.lastName);
-      const bioguide = t.senateID || leg?.bioguide || null;
-      return {
-        name: `${t.firstName || ""} ${t.lastName || ""}`.trim() || t.office || "Unknown",
-        chamber,
-        party: leg?.party || "",
-        state: leg?.state || t.district || "",
-        role: leg ? (leg.type === "sen" ? "Senator" : "Representative") : chamber.replace(/s$/, ""),
-        photo: bioguide ? `https://unitedstates.github.io/images/congress/225x275/${bioguide}.jpg` : null,
-        profileUrl: bioguide ? `https://bioguide.congress.gov/search/bio/${bioguide}` : null,
-        ticker: t.symbol || "—",
-        logo: t.symbol ? `https://financialmodelingprep.com/image-stock/${t.symbol}.png` : null,
-        action: /sale|sold/i.test(t.type || "") ? "SELL"
-              : /purchase|buy/i.test(t.type || "") ? "BUY"
-              : (t.type || "—"),
-        amount: t.amount || "—",
-        date: t.transactionDate || t.disclosureDate || null,
-        asset: t.assetDescription || "",
-      };
-    });
-    const feed = [...norm(sen, "Senate"), ...norm(house, "House")]
-      .filter((x) => x.date)
-      .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 80);
-    if (!feed.length) throw new Error("no disclosures returned");
-    _capCache = { at: Date.now(), data: feed };
-    res.json(feed);
+    const feed = await getCapitolFeed();
+    res.json(feed.slice(0, 80));
   } catch (e) {
     res.status(502).json({ error: "Congress trades unavailable: " + String(e) });
+  }
+});
+
+// Aggregate analysis of all recent congressional trades for one ticker —
+// counts buys/sells, breaks it down by party/chamber, and gives a simple
+// "lean" verdict. Drawn from the same ~200-record recent-disclosures pool
+// as /api/capitol (FMP free tier doesn't expose a deeper per-symbol history).
+app.get("/api/capitol/analyze", requireAuth, async (req, res) => {
+  const symbol = String(req.query.symbol || "").toUpperCase().trim();
+  if (!symbol) return res.status(400).json({ error: "symbol required" });
+  try {
+    const feed = await getCapitolFeed();
+    const trades = feed.filter((t) => (t.ticker || "").toUpperCase() === symbol);
+    const buys = trades.filter((t) => t.action === "BUY").length;
+    const sells = trades.filter((t) => t.action === "SELL").length;
+    const byParty = {};
+    const byMember = {};
+    trades.forEach((t) => {
+      const p = t.party || "Unknown";
+      byParty[p] ||= { buys: 0, sells: 0 };
+      if (t.action === "BUY") byParty[p].buys++; else if (t.action === "SELL") byParty[p].sells++;
+      const m = byMember[t.name] ||= { name: t.name, party: t.party, chamber: t.chamber, buys: 0, sells: 0, lastDate: t.date };
+      if (t.action === "BUY") m.buys++; else if (t.action === "SELL") m.sells++;
+      if (new Date(t.date) > new Date(m.lastDate)) m.lastDate = t.date;
+    });
+    let lean = "Mixed / no clear signal";
+    if (trades.length) {
+      if (buys > sells * 1.5) lean = "Net bullish — more buying than selling";
+      else if (sells > buys * 1.5) lean = "Net bearish — more selling than buying";
+    } else {
+      lean = "No recent disclosures for this ticker in the available window";
+    }
+    res.json({
+      symbol,
+      logo: `https://financialmodelingprep.com/image-stock/${symbol}.png`,
+      totalTrades: trades.length,
+      buys, sells, lean,
+      byParty,
+      members: Object.values(byMember).sort((a, b) => (b.buys + b.sells) - (a.buys + a.sells)),
+      trades: trades.slice(0, 30),
+      windowNote: "Based on the most recent ~200 congressional disclosures available via the free API tier — not a complete trade history.",
+      updated: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(502).json({ error: "Analysis unavailable: " + String(e) });
   }
 });
 
@@ -882,7 +941,18 @@ app.get("/api/earnings", requireAuth, async (req, res) => {
     if (_earnCache.data && Date.now() - _earnCache.at < 6 * 3600_000) return res.json(_earnCache.data);
     const t0 = new Date(); t0.setHours(0, 0, 0, 0);
     const rows = await pooled(HOLDINGS.stocks, 4, async (s) => {
-      const base = { ticker: s.ticker, name: s.name, sector: s.sector || null, tvSymbol: toTradingView(s.ticker), nextEarnings: null, epsEstimate: null, revEstimate: null, lastEpsActual: null, lastEpsEstimate: null };
+      const base = {
+        ticker: s.ticker, name: s.name, sector: s.sector || null, tvSymbol: toTradingView(s.ticker),
+        logo: `https://financialmodelingprep.com/image-stock/${s.ticker}.png`,
+        irUrl: `https://www.google.com/search?q=${encodeURIComponent(s.name + " investor relations")}&btnI=1`,
+        nextEarnings: null, epsEstimate: null, revEstimate: null, lastEpsActual: null, lastEpsEstimate: null,
+      };
+      // If we can find the company's own website, link there instead — it's
+      // usually one click away from their IR/investor page.
+      try {
+        const prof = await cachedSummary(toYahoo(s.ticker), ["summaryProfile"]);
+        if (prof.summaryProfile?.website) base.irUrl = prof.summaryProfile.website;
+      } catch { /* keep search-link fallback */ }
       // 1) FMP — reliable for the US symbols it covers (incl. EPS + revenue).
       try {
         const arr = await fetch(`https://financialmodelingprep.com/stable/earnings?symbol=${encodeURIComponent(s.ticker)}&apikey=${key}`).then((r) => (r.ok ? r.json() : null));
@@ -1146,14 +1216,29 @@ app.get("/api/analytics", requireOwner, async (req, res) => {
     // with the dimensions we slice by, then compute allocations + drill-down.
     const fundsSEK = HOLDINGS.funds.reduce((s, f) => s + (f.value || 0), 0);
     const grandTotal = stockTotalSEK + fundsSEK || 1;
-    const REGION = { US: "North America", CA: "North America", SE: "Europe", DK: "Europe", FR: "Europe", DE: "Europe", GB: "Europe", NO: "Europe", FI: "Europe", NL: "Europe", CH: "Europe", IN: "Asia", CN: "Asia", JP: "Asia", HK: "Asia" };
+    const REGION = { US: "North America", CA: "North America", SE: "Europe", DK: "Europe", FR: "Europe", DE: "Europe", GB: "Europe", NO: "Europe", FI: "Europe", NL: "Europe", CH: "Europe", IN: "Asia", CN: "Asia", JP: "Asia", HK: "Asia", TW: "Asia", KR: "Asia", SG: "Asia" };
     const regionOf = (c, fb) => REGION[c] || fb || "Other";
 
     const priceSEK = (h) => (quotes[h.ticker]?.price ?? h.avgCost) * h.shares * (fx[h.currency] ?? 1);
     const allHoldings = [
       ...HOLDINGS.stocks.map((s) => ({ ticker: s.ticker, name: s.name, valueSEK: priceSEK(s), assetClass: "Stocks", sector: s.sector || "Other", country: s.country || "—", region: regionOf(s.country) })),
       ...HOLDINGS.etfs.map((e)   => ({ ticker: e.ticker, name: e.name, valueSEK: priceSEK(e), assetClass: "ETFs",   sector: e.sector || "Index ETF", country: e.country || "—", region: e.region || regionOf(e.country, "Global") })),
-      ...HOLDINGS.funds.map((f)  => ({ ticker: f.ticker, name: f.name, valueSEK: f.value || 0,  assetClass: "Funds",  sector: f.sector || "Funds & ETFs", country: f.country || "—", region: f.region || "Global" })),
+      ...HOLDINGS.funds.flatMap((f) => {
+        const total = f.value || 0;
+        // Funds with a known underlying country breakdown (e.g. global/Asia
+        // index funds) get split into one slice per country so "Allocation
+        // by country" reflects where the money is actually invested.
+        if (f.countryWeights) {
+          return Object.entries(f.countryWeights).map(([cc, w]) => ({
+            ticker: f.ticker, name: `${f.name} (${cc === "Other" ? "Other markets" : cc})`,
+            valueSEK: total * w / 100, assetClass: "Funds",
+            sector: f.sector || "Funds & ETFs",
+            country: cc === "Other" ? "Other" : cc,
+            region: cc === "Other" ? (f.region || "Global") : regionOf(cc, f.region),
+          }));
+        }
+        return [{ ticker: f.ticker, name: f.name, valueSEK: total, assetClass: "Funds", sector: f.sector || "Funds & ETFs", country: f.country || "—", region: f.region || "Global" }];
+      }),
     ];
 
     // Group holdings by a dimension -> [{ key, valueSEK, pct, holdings:[…] }]
