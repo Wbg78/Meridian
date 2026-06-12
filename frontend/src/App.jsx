@@ -783,13 +783,21 @@ function AnalyticsView({ token }) {
   const [dim, setDim] = useState("assetClass");
   const [data, setData] = useState(null);
   const [err, setErr] = useState(false);
+  const [overlap, setOverlap] = useState(null);
+  const [overlapErr, setOverlapErr] = useState(false);
   useEffect(() => {
     if (!token) return; let c = false; setErr(false);
     fetch(`${BACKEND_URL}/api/analytics`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setData(d); }).catch(() => { if (!c) setErr(true); });
     return () => { c = true; };
   }, [token]);
-  const sections = ["allocations","risk","glossary"];
+  useEffect(() => {
+    if (!token || section!=="overlap" || overlap || overlapErr) return; let c = false;
+    fetch(`${BACKEND_URL}/api/overlap`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject()).then(d => { if (!c) setOverlap(d); }).catch(() => { if (!c) setOverlapErr(true); });
+    return () => { c = true; };
+  }, [token, section]);
+  const sections = ["allocations","overlap","risk","glossary"];
   const dims = [["assetClass","Asset class"],["sector","Industry"],["country","Country"],["region","Region"]];
   const COLORS = ["bg-violet-500","bg-sky-500","bg-emerald-500","bg-amber-500","bg-rose-500","bg-fuchsia-500","bg-cyan-500","bg-orange-500"];
   const fmtPct = (x) => x!=null ? `${x>0?"+":""}${x}%` : "—";
@@ -823,6 +831,34 @@ function AnalyticsView({ token }) {
           {alloc.map((slice,i)=>(
             <AllocSlice key={slice.key} slice={slice} dim={dim} max={maxPct} color={COLORS[i%COLORS.length]} token={token} />
           ))}
+        </div>
+      )}
+
+      {section==="overlap" && (
+        <div className="space-y-3">
+          {overlapErr && <Card><p className="text-red-400 text-sm">Couldn't load overlap analysis.</p></Card>}
+          {!overlap && !overlapErr && <Card><p className="text-[var(--muted)] text-sm">Cross-referencing your funds…</p></Card>}
+          {overlap && (
+            <>
+              <Card>
+                <p className="text-[var(--muted)] text-xs leading-relaxed">
+                  Shows stocks you're exposed to through <span className="text-[var(--text)] font-semibold">more than one</span> holding —
+                  e.g. directly <span className="text-[var(--text)] font-semibold">and</span> via a fund, or via two funds at once.
+                  {" "}{overlap.disclaimer}
+                </p>
+              </Card>
+              {overlap.overlaps.length === 0 && (
+                <Card><p className="text-[var(--muted)] text-sm">No overlapping exposure found.</p></Card>
+              )}
+              {overlap.overlaps.map((o) => (
+                <OverlapCard key={o.ticker} o={o} />
+              ))}
+              <p className="text-[var(--muted)] text-[11px] px-1 pt-2">Fund breakdown (curated top holdings)</p>
+              {overlap.fundBreakdown.map((f) => (
+                <FundHoldingsCard key={f.ticker} f={f} />
+              ))}
+            </>
+          )}
         </div>
       )}
 
@@ -867,6 +903,74 @@ function AnalyticsView({ token }) {
         </div>
       )}
     </div>
+  );
+}
+
+// One overlapping holding — total combined SEK exposure across all
+// sources (direct position + each fund/ETF that holds it), expandable
+// to show the per-source breakdown.
+function OverlapCard({ o }) {
+  const [open, setOpen] = useState(false);
+  const direct = o.sources.find(s => s.from === "Direct holding");
+  return (
+    <Card onClick={() => setOpen(s => !s)} className="cursor-pointer">
+      <div className="flex justify-between items-center">
+        <div>
+          <span className="text-[var(--text)] font-bold text-sm">{o.ticker}</span>
+          <span className="text-[var(--muted)] text-xs ml-2">{o.name}</span>
+        </div>
+        <span className="text-[var(--text)] font-black text-sm">{o.totalSEK.toLocaleString("sv-SE")} kr</span>
+      </div>
+      <div className="flex gap-1.5 mt-2 flex-wrap">
+        {direct && <Pill color="violet" sm>Direct</Pill>}
+        {o.sources.filter(s=>s.from!=="Direct holding").map((s,i) => (
+          <Pill key={i} color="sky" sm>{s.from}</Pill>
+        ))}
+      </div>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-[var(--border)] space-y-1.5">
+          {o.sources.map((s,i) => (
+            <div key={i} className="flex justify-between items-center text-xs gap-2">
+              <span className="text-[var(--muted)] truncate flex-1">{s.from}{s.weight!=null?` · ${s.weight}% weight`:""}</span>
+              <span className="text-[var(--text)] font-bold">{s.valueSEK.toLocaleString("sv-SE")} kr</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// One fund/ETF's curated top holdings, with their estimated SEK exposure.
+function FundHoldingsCard({ f }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card onClick={() => setOpen(s => !s)} className="cursor-pointer">
+      <div className="flex justify-between items-center">
+        <div>
+          <span className="text-[var(--text)] font-bold text-sm">{f.name}</span>
+          <span className="text-[var(--muted)] text-xs ml-2">{f.ticker}</span>
+        </div>
+        <div className="text-right">
+          <span className="text-[var(--text)] font-black text-sm">{f.valueSEK.toLocaleString("sv-SE")} kr</span>
+          <p className="text-[var(--muted)] text-[10px]">{open?"▲ hide":"▼ top holdings"}</p>
+        </div>
+      </div>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-[var(--border)] space-y-1.5">
+          {f.note && <p className="text-[var(--muted)] text-xs">{f.note}</p>}
+          {f.topHoldings.map((h,i) => (
+            <div key={i} className="flex justify-between items-center text-xs gap-2">
+              <span className="text-[var(--text)] font-semibold w-16 flex-shrink-0">{h.ticker}</span>
+              <span className="text-[var(--muted)] truncate flex-1">{h.name}</span>
+              <span className="text-[var(--muted)] text-[10px] mr-1">{h.weight}%</span>
+              <span className="text-[var(--text)] font-bold">{h.valueSEK.toLocaleString("sv-SE")} kr</span>
+            </div>
+          ))}
+          {f.asOf && <p className="text-[var(--muted)] text-[10px] pt-1">As of: {f.asOf}</p>}
+        </div>
+      )}
+    </Card>
   );
 }
 

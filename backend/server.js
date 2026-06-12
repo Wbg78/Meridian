@@ -146,6 +146,107 @@ const HOLDINGS = {
   ],
 };
 
+// Curated top holdings for funds/ETFs whose underlying constituents aren't
+// available via free APIs (FMP's ETF/fund holdings endpoint is paid-only).
+// Weights are approximate, sourced from each fund's public fact sheet —
+// refresh periodically. Tickers reuse the same symbols as HOLDINGS.stocks
+// where a holding overlaps a direct position, so /api/overlap can match them.
+const FUND_HOLDINGS = {
+  "AVZ-GLO": {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "AAPL",  name: "Apple",              weight: 4.5 },
+      { ticker: "MSFT",  name: "Microsoft",          weight: 4.2 },
+      { ticker: "NVDA",  name: "Nvidia",             weight: 4.0 },
+      { ticker: "AMZN",  name: "Amazon",             weight: 2.2 },
+      { ticker: "GOOGL", name: "Alphabet",           weight: 1.8 },
+      { ticker: "META",  name: "Meta Platforms",     weight: 1.3 },
+      { ticker: "AVGO",  name: "Broadcom",           weight: 1.0 },
+      { ticker: "TSLA",  name: "Tesla",              weight: 0.9 },
+      { ticker: "NVO",   name: "Novo Nordisk",       weight: 0.4 },
+    ],
+  },
+  "AVZ-USA": {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "AAPL",  name: "Apple",              weight: 7.0 },
+      { ticker: "MSFT",  name: "Microsoft",          weight: 6.5 },
+      { ticker: "NVDA",  name: "Nvidia",             weight: 6.3 },
+      { ticker: "AMZN",  name: "Amazon",             weight: 3.8 },
+      { ticker: "GOOGL", name: "Alphabet",           weight: 3.5 },
+      { ticker: "META",  name: "Meta Platforms",     weight: 2.5 },
+      { ticker: "AVGO",  name: "Broadcom",           weight: 2.0 },
+      { ticker: "TSLA",  name: "Tesla",              weight: 1.8 },
+      { ticker: "BRK-B", name: "Berkshire Hathaway", weight: 1.6 },
+    ],
+  },
+  "AVZ-ZERO": {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "INVE-B", name: "Investor B",        weight: 8.5 },
+      { ticker: "ATCO-A", name: "Atlas Copco A",      weight: 7.0 },
+      { ticker: "VOLV-B", name: "Volvo B",            weight: 6.5 },
+      { ticker: "HEXA-B", name: "Hexagon B",          weight: 5.0 },
+      { ticker: "SAND",   name: "Sandvik",            weight: 4.5 },
+      { ticker: "SEB-A",  name: "SEB A",              weight: 4.5 },
+      { ticker: "EPI-A",  name: "Epiroc A",           weight: 4.0 },
+      { ticker: "ASSA-B", name: "Assa Abloy B",       weight: 4.0 },
+      { ticker: "ERIC-B", name: "Ericsson B",         weight: 3.0 },
+      { ticker: "NIBE-B", name: "Nibe Industrier B",  weight: 2.5 },
+    ],
+  },
+  XACT: {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "INVE-B", name: "Investor B",        weight: 9.0 },
+      { ticker: "ATCO-A", name: "Atlas Copco A",      weight: 7.0 },
+      { ticker: "VOLV-B", name: "Volvo B",            weight: 6.5 },
+      { ticker: "HEXA-B", name: "Hexagon B",          weight: 5.0 },
+      { ticker: "SEB-A",  name: "SEB A",              weight: 5.0 },
+      { ticker: "SAND",   name: "Sandvik",            weight: 4.5 },
+      { ticker: "EPI-A",  name: "Epiroc A",           weight: 4.5 },
+      { ticker: "ASSA-B", name: "Assa Abloy B",       weight: 4.0 },
+      { ticker: "ERIC-B", name: "Ericsson B",         weight: 3.0 },
+      { ticker: "NIBE-B", name: "Nibe Industrier B",  weight: 2.0 },
+    ],
+  },
+  FLXI: {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "HDFCBANK",   name: "HDFC Bank",            weight: 12.0 },
+      { ticker: "RELIANCE",   name: "Reliance Industries",  weight: 9.0 },
+      { ticker: "ICICIBANK",  name: "ICICI Bank",           weight: 8.0 },
+      { ticker: "INFY",       name: "Infosys",              weight: 5.5 },
+      { ticker: "BHARTIARTL", name: "Bharti Airtel",        weight: 4.0 },
+    ],
+  },
+  "SWB-ASIEN": {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "TSM",        name: "Taiwan Semiconductor",  weight: 9.0 },
+      { ticker: "0700.HK",    name: "Tencent",               weight: 6.0 },
+      { ticker: "005930.KS",  name: "Samsung Electronics",   weight: 5.5 },
+      { ticker: "BABA",       name: "Alibaba",               weight: 3.0 },
+      { ticker: "AIA",        name: "AIA Group",             weight: 2.5 },
+    ],
+  },
+  "PLUS-FAST": {
+    asOf: "2025 fact sheet (approx.)",
+    holdings: [
+      { ticker: "CAST",   name: "Castellum",           weight: 10.0 },
+      { ticker: "BALD-B", name: "Fastighets Balder B", weight: 9.0 },
+      { ticker: "FABG",   name: "Fabege",              weight: 8.0 },
+      { ticker: "WALL-B", name: "Wallenstam B",        weight: 7.0 },
+      { ticker: "SBB-B",  name: "SBB B",               weight: 5.0 },
+    ],
+  },
+  "AMF-LANG": {
+    asOf: null,
+    note: "Fixed-income fund (Swedish bonds) — no equity overlap with stock/ETF holdings.",
+    holdings: [],
+  },
+};
+
 // ─── helpers ────────────────────────────────────────────────────
 
 // Yahoo's public v8 chart endpoint needs NO API key and NO "crumb"
@@ -1123,6 +1224,64 @@ app.get("/api/analytics", requireOwner, async (req, res) => {
       fundsSEK: Math.round(fundsSEK),
       allocations,
       sharpe, volatility, annReturn, riskFree: RF * 100,
+      updated: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Fund/ETF overlap analysis — OWNER ONLY.
+// Cross-references each fund/ETF's curated top holdings (FUND_HOLDINGS)
+// against each other and against direct stock positions, surfacing names
+// you're exposed to via multiple vehicles with their combined SEK value.
+app.get("/api/overlap", requireOwner, async (req, res) => {
+  try {
+    const fx = await fxToSEK();
+    const equities = [...HOLDINGS.stocks, ...HOLDINGS.etfs];
+    const quotes = await fetchQuotes(equities.map((e) => e.ticker));
+    const priceSEK = (h) => (quotes[h.ticker]?.price ?? h.avgCost) * h.shares * (fx[h.currency] ?? 1);
+
+    // exposure[ticker] -> { name, totalSEK, sources: [{ from, valueSEK, weight }] }
+    const exposure = {};
+    const add = (ticker, name, valueSEK, from, weight) => {
+      const e = (exposure[ticker] ||= { name, totalSEK: 0, sources: [] });
+      e.totalSEK += valueSEK;
+      e.sources.push({ from, valueSEK: Math.round(valueSEK), weight: weight ?? null });
+    };
+
+    // Direct stock positions count as 100% exposure to themselves.
+    HOLDINGS.stocks.forEach((s) => add(s.ticker, s.name, priceSEK(s), "Direct holding", null));
+
+    // Spread each fund/ETF's SEK value across its curated top holdings.
+    const fundVehicles = [...HOLDINGS.funds, ...HOLDINGS.etfs];
+    const fundBreakdown = fundVehicles.map((f) => {
+      const fh = FUND_HOLDINGS[f.ticker];
+      const valueSEK = f.value != null ? f.value : priceSEK(f);
+      if (!fh || !fh.holdings.length) {
+        return { ticker: f.ticker, name: f.name, valueSEK: Math.round(valueSEK), asOf: fh?.asOf || null, note: fh?.note || "Holdings data unavailable", topHoldings: [] };
+      }
+      fh.holdings.forEach((h) => add(h.ticker, h.name, valueSEK * h.weight / 100, f.name, h.weight));
+      return {
+        ticker: f.ticker, name: f.name, valueSEK: Math.round(valueSEK), asOf: fh.asOf, note: null,
+        topHoldings: fh.holdings.map((h) => ({ ...h, valueSEK: Math.round(valueSEK * h.weight / 100) })),
+      };
+    });
+
+    // Anything exposed to via 2+ sources (direct + fund, or fund + fund) is an overlap.
+    const overlaps = Object.entries(exposure)
+      .filter(([, e]) => e.sources.length > 1)
+      .map(([ticker, e]) => ({
+        ticker, name: e.name,
+        totalSEK: Math.round(e.totalSEK),
+        sources: e.sources.sort((a, b) => b.valueSEK - a.valueSEK),
+      }))
+      .sort((a, b) => b.totalSEK - a.totalSEK);
+
+    res.json({
+      overlaps,
+      fundBreakdown,
+      disclaimer: "Fund/ETF holdings are curated from public fact sheets and refreshed periodically — treat weights as approximate, not live.",
       updated: new Date().toISOString(),
     });
   } catch (e) {
