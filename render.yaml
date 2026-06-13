@@ -18,3 +18,8 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      # SEC EDGAR requires a contact in the User-Agent or it returns 403.
+      - key: SEC_USER_AGENT
+        value: Meridian/1.0 willebg91@outlook.com
+      - key: RESEARCH_MODEL
+        value: claude-sonnet-4-6
