@@ -17,6 +17,8 @@ import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
 import { toYahoo, SYMBOL_MAP, toTradingView } from "./symbols.js";
+import { initDb } from "./db.js";
+import { researchRouter } from "./research.js";
 
 const app = express();
 app.use(express.json());
@@ -109,6 +111,11 @@ app.post("/api/login", (req, res) => {
   if (safeEqual(pw, ACCESS_CODE))    return res.json({ token: makeToken("guest"), role: "guest" });
   return res.status(401).json({ error: "Incorrect password or code" });
 });
+
+// --- Deep Research engine (owner-only; see research.js) ---
+await initDb();
+app.use("/api/research", requireOwner, researchRouter);
+
 
 // Your real holdings (shares + avg cost). Prices are fetched live.
 // Edit shares/avgCost here whenever you buy or sell.

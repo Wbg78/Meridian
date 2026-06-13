@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import ResearchConsole from "./ResearchConsole.jsx";
 
 // ─── BACKEND ───────────────────────────────────────────────────
 // Where the data server lives. Locally it's localhost:3001.
@@ -1737,7 +1738,7 @@ const VIEWS = {
   screener: ScreenerView,
   capitol: CapitolView,
   earnings: EarningsView,
-  research: ResearchView,
+  research: ResearchConsole,
   network: NetworkView,
   tasks: TasksView,
   calendar: CalendarView,
