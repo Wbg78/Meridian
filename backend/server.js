@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 import { toYahoo, SYMBOL_MAP, toTradingView } from "./symbols.js";
 import { initDb } from "./db.js";
 import { researchRouter } from "./research.js";
+import { resolveOutcomes } from "./signals-tracker.js";
 
 const app = express();
 app.use(express.json());
@@ -115,6 +116,21 @@ app.post("/api/login", (req, res) => {
 // --- Deep Research engine (owner-only; see research.js) ---
 await initDb();
 app.use("/api/research", requireOwner, researchRouter);
+
+// --- Signal-engine learning loop ---
+// Once a day, resolve outcomes for signals that fired 7+ days ago:
+// did the stock actually move in the predicted direction? This is how
+// source credibility scores drift toward empirical accuracy over time.
+async function priceForOutcome(ticker) {
+  try {
+    const q = await fetchQuotes([ticker]);
+    return q[ticker]?.price || null;
+  } catch { return null; }
+}
+setInterval(async () => {
+  const result = await resolveOutcomes(priceForOutcome).catch(() => null);
+  if (result?.resolved > 0) console.log(`Signal outcomes resolved: ${result.resolved}`);
+}, 86400_000);
 
 
 // Your real holdings (shares + avg cost). Prices are fetched live.

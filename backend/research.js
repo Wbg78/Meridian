@@ -28,6 +28,8 @@ import {
   getOntology, saveOntology, saveRun, recentRuns, getRun,
   listShocks, saveShock, deleteShock,
 } from "./db.js";
+import { gatherSignalsV2, getCachedSignals } from "./signals.js";
+import { recordSignals, crossReferenceSignals, detectAnomalies } from "./signals-tracker.js";
 
 const MODEL = process.env.RESEARCH_MODEL || "claude-sonnet-4-6";
 const API = "https://api.anthropic.com/v1/messages";
@@ -157,7 +159,37 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
   ticker = ticker.toUpperCase().trim();
   yield { stage: "resolve", status: "running", label: `Resolving ${ticker}` };
 
-  // 1) Try the persisted graph first.
+  // ── STAGE 0: Signal engine (runs BEFORE ontology) ──────────────
+  yield { stage: "signals", status: "running", label: "Gathering institutional positioning signals" };
+  let positioningSignal = null;
+  let anomalies = [];
+  try {
+    positioningSignal = await gatherSignalsV2(ticker);
+
+    // Record signals for learning (background, non-blocking)
+    recordSignals(ticker, positioningSignal.scoredSignals || [], null)
+      .catch(e => console.warn("recordSignals failed:", e.message));
+
+    // Cross-reference and detect anomalies (background)
+    const [crossRefs, detectedAnomalies] = await Promise.all([
+      crossReferenceSignals(ticker, positioningSignal.scoredSignals || []),
+      detectAnomalies(ticker, positioningSignal.scoredSignals || [], null),
+    ]);
+    positioningSignal.crossReferences = crossRefs;
+    anomalies = detectedAnomalies;
+
+    yield {
+      stage: "signals",
+      status: "done",
+      label: `Signals: ${positioningSignal.totalSignals} gathered — ${positioningSignal.direction} (conf ${positioningSignal.confidence})${positioningSignal.hasConflict ? " ⚠ CONFLICT DETECTED" : ""}`,
+      data: positioningSignal,
+      anomalies,
+    };
+  } catch (e) {
+    yield { stage: "signals", status: "warn", label: `Signals unavailable: ${e.message} — continuing without` };
+  }
+
+  // ── STAGE 1: Ontology (cached or fresh) ────────────────────────
   let graph = null;
   if (!force) {
     const row = await getOntology(ticker).catch(() => null);
@@ -168,7 +200,6 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
     }
   }
 
-  // 2) Fresh build when there's no usable graph.
   if (!graph) {
     yield { stage: "edgar", status: "running", label: "Pulling SEC EDGAR filings & financials" };
     const spine = await buildEdgarSpine(ticker).catch(() => null);
@@ -192,13 +223,23 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
     yield { stage: "ontology", status: "done", label: "Entity graph built & saved", data: graph };
   }
 
-  // 3) Inject the shock.
+  // Inject positioning signal into the graph as a node so the crisis
+  // pass sees both fundamentals AND what the market is doing.
+  if (positioningSignal) {
+    graph.positioningSignal = positioningSignal;
+    graph.anomalies = anomalies;
+  }
+
+  // ── STAGE 2: Crisis propagation ────────────────────────────────
   yield { stage: "crisis", status: "running", label: `Injecting shock: "${scenario}" — walking the web` };
   const impact = await propagateCrisis({ ticker, scenario, graph });
   const run = await saveRun({ ticker, scenario, impact }).catch(() => null);
   yield { stage: "crisis", status: "done", label: "Shock propagated", data: impact };
 
-  yield { stage: "done", status: "done", label: "Dossier ready", data: { ticker, scenario, ontology: graph, impact, runId: run?.id ?? null } };
+  yield {
+    stage: "done", status: "done", label: "Dossier ready",
+    data: { ticker, scenario, ontology: graph, impact, positioningSignal, anomalies, runId: run?.id ?? null }
+  };
 }
 
 // ─── Express router ─────────────────────────────────────────────
@@ -255,4 +296,38 @@ researchRouter.get("/runs/:id", async (req, res) => {
     if (!run) return res.status(404).json({ error: "not found" });
     res.json(run);
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ─── Signal-engine endpoints ────────────────────────────────────
+
+// Twitter budget status
+researchRouter.get("/twitter-budget", async (req, res) => {
+  try {
+    const { getBudgetStatus } = await import("./twitter.js");
+    res.json(getBudgetStatus());
+  } catch { res.json({ error: "Twitter not configured" }); }
+});
+
+// Signal history for a ticker
+researchRouter.get("/signals/:ticker", async (req, res) => {
+  try {
+    const { getSignalHistory } = await import("./signals-tracker.js");
+    res.json(await getSignalHistory(req.params.ticker.toUpperCase(), 20));
+  } catch (e) { res.status(500).json({ error: String(e.message) }); }
+});
+
+// Anomaly log
+researchRouter.get("/anomalies", async (req, res) => {
+  try {
+    const { getAnomalyLog } = await import("./signals-tracker.js");
+    res.json(await getAnomalyLog(req.query.ticker || null, 15));
+  } catch (e) { res.status(500).json({ error: String(e.message) }); }
+});
+
+// Source accuracy leaderboard
+researchRouter.get("/accuracy", async (req, res) => {
+  try {
+    const { getSourceLeaderboard } = await import("./signals-tracker.js");
+    res.json(await getSourceLeaderboard());
+  } catch (e) { res.status(500).json({ error: String(e.message) }); }
 });

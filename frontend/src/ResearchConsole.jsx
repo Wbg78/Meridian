@@ -30,8 +30,8 @@ const Pill = ({ color = "violet", children }) => {
 };
 const Label = ({ children }) => <p className="text-[11px] font-bold tracking-[0.12em] uppercase text-[var(--muted)] mb-2">{children}</p>;
 
-const STAGE_ORDER = ["resolve", "edgar", "ontology", "crisis", "done"];
-const STAGE_NAME = { resolve: "Resolve ticker", edgar: "SEC EDGAR pull", ontology: "Entity graph", crisis: "Shock propagation", done: "Dossier" };
+const STAGE_ORDER = ["resolve", "signals", "edgar", "ontology", "crisis", "done"];
+const STAGE_NAME = { resolve: "Resolve ticker", signals: "Positioning signals", edgar: "SEC EDGAR pull", ontology: "Entity graph", crisis: "Shock propagation", done: "Dossier" };
 
 const dirColor = (d) => (d === "bullish" || d === "positive" ? "green" : d === "bearish" || d === "negative" ? "red" : "amber");
 const auth = (token) => ({ Authorization: `Bearer ${token}` });
@@ -48,18 +48,32 @@ export default function ResearchConsole({ token }) {
   const [shocks, setShocks] = useState([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [runs, setRuns] = useState([]);
+  const [twBudget, setTwBudget] = useState(null);
+  const [accuracy, setAccuracy] = useState([]);
+  const [sigHistory, setSigHistory] = useState([]);
+  const [intelTab, setIntelTab] = useState("accuracy");
   const abortRef = useRef(null);
 
-  // Load the scenario library + recent history once.
+  // Load the scenario library + recent history + signal intel once.
   useEffect(() => {
     if (!token) return;
     let c = false;
-    fetch(`${BACKEND_URL}/api/research/shocks`, { headers: auth(token) })
-      .then((r) => (r.ok ? r.json() : [])).then((d) => { if (!c) setShocks(Array.isArray(d) ? d : []); }).catch(() => {});
-    fetch(`${BACKEND_URL}/api/research/runs`, { headers: auth(token) })
-      .then((r) => (r.ok ? r.json() : [])).then((d) => { if (!c) setRuns(Array.isArray(d) ? d : []); }).catch(() => {});
+    const get = (path) => fetch(`${BACKEND_URL}/api/research/${path}`, { headers: auth(token) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    get("shocks").then((d) => { if (!c && Array.isArray(d)) setShocks(d); });
+    get("runs").then((d) => { if (!c && Array.isArray(d)) setRuns(d); });
+    get("accuracy").then((d) => { if (!c && Array.isArray(d)) setAccuracy(d); });
+    get("twitter-budget").then((d) => { if (!c && d && !d.error) setTwBudget(d); });
     return () => { c = true; };
   }, [token]);
+
+  // Refresh per-ticker signal history whenever a result loads.
+  useEffect(() => {
+    if (!token || !result?.ticker) return;
+    let c = false;
+    fetch(`${BACKEND_URL}/api/research/signals/${result.ticker}`, { headers: auth(token) })
+      .then((r) => (r.ok ? r.json() : [])).then((d) => { if (!c) setSigHistory(Array.isArray(d) ? d : []); }).catch(() => {});
+    return () => { c = true; };
+  }, [token, result?.ticker]);
 
   const stageStatus = (s) => {
     const evs = events.filter((e) => e.stage === s);
@@ -144,7 +158,14 @@ export default function ResearchConsole({ token }) {
     <div className="space-y-5">
       {/* ── Input console ── */}
       <Card accent>
-        <Label>Deep research · ticker + crisis</Label>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <Label>Deep research · ticker + crisis</Label>
+          {twBudget && (
+            <span title={`X/Twitter: ${(twBudget.monthlyUsed ?? 0).toLocaleString()} / ${(twBudget.monthlyBudget ?? 0).toLocaleString()} tweet reads this month`}>
+              <Pill color={twBudget.monthlyPct > 90 ? "red" : twBudget.monthlyPct > 70 ? "amber" : "gray"}>𝕏 {twBudget.monthlyPct ?? 0}% used</Pill>
+            </span>
+          )}
+        </div>
         <div className="flex gap-2 mb-3">
           <input
             value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())}
@@ -208,6 +229,7 @@ export default function ResearchConsole({ token }) {
               const ev = [...events].reverse().find((e) => e.stage === s);
               const dot = st === "done" || st === "cached" ? "bg-emerald-500"
                 : st === "running" ? "bg-violet-500 animate-pulse"
+                : st === "warn" ? "bg-amber-500"
                 : "bg-zinc-700";
               return (
                 <div key={s} className="flex items-center gap-3">
@@ -221,6 +243,9 @@ export default function ResearchConsole({ token }) {
           </div>
         </Card>
       )}
+
+      {/* ── Positioning signals ── */}
+      {result?.positioningSignal && <SignalPanel signal={result.positioningSignal} anomalies={result.anomalies} />}
 
       {/* ── Impact dossier ── */}
       {result?.impact && <ImpactDossier impact={result.impact} />}
@@ -242,6 +267,160 @@ export default function ResearchConsole({ token }) {
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ── Signal intelligence (accuracy leaderboard + per-ticker history) ── */}
+      {(accuracy.length > 0 || sigHistory.length > 0) && !running && (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Label>Signal intelligence</Label>
+            <div className="flex gap-1 ml-auto">
+              {[["accuracy", "Accuracy"], ["history", `History${result?.ticker ? " · " + result.ticker : ""}`]].map(([id, name]) => (
+                <button key={id} onClick={() => setIntelTab(id)}
+                  className={`text-[10px] px-2 py-1 rounded-lg border font-bold transition-colors ${intelTab === id ? "border-violet-500/40 text-violet-400 bg-violet-500/10" : "border-[var(--border)] text-[var(--muted)]"}`}>
+                  {name}
+                </button>
+              ))}
+            </div>
+          </div>
+          {intelTab === "accuracy" ? <AccuracyBoard rows={accuracy} /> : <SignalHistory rows={sigHistory} ticker={result?.ticker} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Source-accuracy leaderboard — how often each source's signals proved
+// right (resolved 7 days after firing). Handles both the Postgres row
+// shape (accuracy_rate/total_signals/credibility_adj) and the in-memory
+// shape (accuracy/total/credibilityAdj).
+function AccuracyBoard({ rows }) {
+  if (!rows.length) return <Card><p className="text-[var(--muted)] text-xs">No accuracy data yet — a source needs 10+ resolved signals (each scored 7 days after it fired) before it's ranked.</p></Card>;
+  return (
+    <div className="space-y-1.5">
+      {rows.map((r, i) => {
+        const acc = r.accuracy_rate ?? r.accuracy ?? 0;
+        const total = r.total_signals ?? r.total ?? 0;
+        const adj = r.credibility_adj ?? r.credibilityAdj ?? 0;
+        return (
+          <div key={i} className="flex items-center gap-2 bg-[var(--card)] border border-[var(--border)] rounded-xl px-3 py-2">
+            <span className="text-[var(--text)] text-xs font-bold flex-1 truncate">{r.source_key}</span>
+            <span className="text-[var(--muted)] text-[10px]">{total} signals</span>
+            {adj !== 0 && <span className={`text-[10px] font-bold ${adj > 0 ? "text-emerald-400" : "text-red-400"}`}>{adj > 0 ? "+" : ""}{adj.toFixed(2)}</span>}
+            <Pill color={acc >= 0.6 ? "green" : acc >= 0.45 ? "amber" : "red"}>{Math.round(acc * 100)}% acc</Pill>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Per-ticker recorded signal history, with right/wrong outcome once resolved.
+function SignalHistory({ rows, ticker }) {
+  if (!rows.length) return <Card><p className="text-[var(--muted)] text-xs">No recorded signals{ticker ? ` for ${ticker}` : ""} yet — run an analysis to populate history. Outcomes resolve 7 days after a signal fires.</p></Card>;
+  return (
+    <div className="space-y-1.5">
+      {rows.map((s, i) => (
+        <div key={s.id ?? i} className="bg-[var(--card)] border border-[var(--border)] rounded-xl px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Pill color={dirColor(s.direction)}>{s.direction}</Pill>
+            <span className="text-[var(--muted)] text-[10px] truncate flex-1">{s.source}</span>
+            {s.corroborated && <Pill color="violet">corroborated</Pill>}
+            {s.correct != null && <Pill color={s.correct ? "green" : "red"}>{s.correct ? "✓ right" : "✗ wrong"}</Pill>}
+          </div>
+          {s.headline && <p className="text-[var(--text)] text-[11px] mt-1 leading-snug">{s.url ? <a href={s.url} target="_blank" rel="noreferrer" className="hover:text-violet-400">{s.headline}</a> : s.headline}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Positioning signals gathered before the ontology build — what the
+// market is doing (insiders, news, analysts, retail, optional Twitter),
+// bias-corrected and weighted, plus any anomalies the tracker flagged.
+function SignalPanel({ signal, anomalies = [] }) {
+  const sb = signal.sourceBreakdown || {};
+  const empty = !signal.totalSignals;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label>Market positioning · before fundamentals</Label>
+        <div className="flex items-center gap-2">
+          <Pill color={dirColor(signal.direction)}>{signal.direction}</Pill>
+          {signal.confidence != null && <span className="text-[var(--muted)] text-[10px]">conf {Math.round(signal.confidence * 100)}%</span>}
+        </div>
+      </div>
+
+      {/* Anomaly warnings — prominent */}
+      {anomalies.length > 0 && anomalies.map((a, i) => (
+        <Card key={i} className="border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-2 mb-1">
+            <Pill color="amber">⚠ {String(a.type || a.anomaly_type || "anomaly").replace(/_/g, " ")}</Pill>
+          </div>
+          <p className="text-amber-200/90 text-xs leading-relaxed">{a.description}</p>
+        </Card>
+      ))}
+
+      <Card accent={!empty}>
+        {empty ? (
+          <p className="text-[var(--muted)] text-xs">{signal.conflictNote || "No positioning signals found for this ticker right now (free sources can be sparse — adding NewsAPI/Finnhub keys widens coverage)."}</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-2 mb-3">
+              <span className="text-[var(--text)] text-xs font-bold">{signal.totalSignals} signals</span>
+              <span className="text-emerald-400 text-xs">{signal.bullSignals} bull</span>
+              <span className="text-red-400 text-xs">{signal.bearSignals} bear</span>
+              <span className="text-[var(--muted)] text-xs">{signal.neutralSignals} neutral</span>
+              {signal.corroborationMultiplier != null && <span className="text-[var(--muted)] text-[10px] ml-auto">corroboration ×{signal.corroborationMultiplier}</span>}
+            </div>
+
+            {/* source breakdown */}
+            <div className="grid grid-cols-5 gap-1.5 mb-3">
+              {[["SEC", sb.sec], ["News", sb.news], ["Reddit", sb.reddit], ["Analyst", sb.analyst], ["X", sb.twitter]].map(([k, v]) => (
+                <div key={k} className="bg-[var(--bg)] border border-[var(--border)] rounded-lg p-1.5 text-center">
+                  <p className="text-[var(--text)] text-xs font-bold">{v ?? 0}</p>
+                  <p className="text-[var(--muted)] text-[9px] uppercase">{k}</p>
+                </div>
+              ))}
+            </div>
+
+            {signal.keyDriver && (
+              <div className="mb-2">
+                <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest mb-1">Key driver</p>
+                <a href={signal.keyDriver.url || undefined} target="_blank" rel="noreferrer" className="text-[var(--text)] text-xs hover:text-violet-400 leading-snug block">
+                  {signal.keyDriver.headline}
+                  <span className="text-[var(--muted)]"> · {signal.keyDriver.source}</span>
+                </a>
+              </div>
+            )}
+
+            {signal.hasConflict && signal.conflictNote && (
+              <p className="text-amber-400 text-[11px] mt-2">⚠ {signal.conflictNote}</p>
+            )}
+            {signal.politicalBiasNote && <p className="text-[var(--muted)] text-[10px] mt-2 italic">{signal.politicalBiasNote}</p>}
+            {signal.learningNote && <p className="text-violet-400/80 text-[10px] mt-1">{signal.learningNote}</p>}
+          </>
+        )}
+      </Card>
+
+      {/* top signals by direction */}
+      {(signal.topBullishSignals?.length > 0 || signal.topBearishSignals?.length > 0) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {signal.topBullishSignals?.length > 0 && (
+            <Card><Label>Top bullish</Label>
+              <div className="space-y-1.5">{signal.topBullishSignals.map((s, i) => (
+                <a key={i} href={s.url || undefined} target="_blank" rel="noreferrer" className="block text-[var(--text)] text-[11px] hover:text-emerald-400 leading-snug truncate">↗ {s.headline} <span className="text-[var(--muted)]">· {s.source}</span></a>
+              ))}</div>
+            </Card>
+          )}
+          {signal.topBearishSignals?.length > 0 && (
+            <Card><Label>Top bearish</Label>
+              <div className="space-y-1.5">{signal.topBearishSignals.map((s, i) => (
+                <a key={i} href={s.url || undefined} target="_blank" rel="noreferrer" className="block text-[var(--text)] text-[11px] hover:text-red-400 leading-snug truncate">↗ {s.headline} <span className="text-[var(--muted)]">· {s.source}</span></a>
+              ))}</div>
+            </Card>
+          )}
         </div>
       )}
     </div>

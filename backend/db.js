@@ -16,6 +16,8 @@
 // point DATABASE_URL at a database.
 // ───────────────────────────────────────────────────────────────
 
+import { TRACKER_SCHEMA, setPool } from "./signals-tracker.js";
+
 const HAS_DB = !!process.env.DATABASE_URL;
 let pool = null;
 const usePg = () => HAS_DB && pool;
@@ -39,6 +41,7 @@ export async function initDb() {
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
     });
+    setPool(pool); // share the pool with the signal-engine tracker
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ontologies (
         ticker     text PRIMARY KEY,
@@ -63,6 +66,7 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS runs_ticker_idx ON runs (ticker, created_at DESC);
     `);
+    await pool.query(TRACKER_SCHEMA); // signal_history, source_accuracy, anomaly_log
     console.log("✅ Research DB ready (Postgres).");
   } catch (e) {
     pool = null;
