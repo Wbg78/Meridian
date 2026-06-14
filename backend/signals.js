@@ -438,6 +438,69 @@ function recToSentiment(rec) {
   return (bullish - bearish) / total;
 }
 
+// ─── SOURCE 5: Google News RSS (KEYLESS — no API key needed) ─────
+// NewsAPI requires a key and Reddit now 403s unauthenticated requests,
+// so this is the engine's primary keyless news source. It searches the
+// ticker plus positioning keywords; headlines carry the publisher name,
+// so resolveSourceKey() still maps Reuters/Bloomberg/CNBC etc. to their
+// real credibility tiers. Sentiment is inferred from the headline text.
+const NEWS_MAX_AGE_MS = 7 * 86400_000;
+
+function parseGoogleNewsRss(xml) {
+  const items = [];
+  const blocks = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+  for (const b of blocks) {
+    const pick = (tag) => {
+      const m = b.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
+      if (!m) return "";
+      return m[1].replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "").replace(/<[^>]+>/g, "").trim();
+    };
+    let title = pick("title");
+    const link = pick("link");
+    const pubDate = pick("pubDate");
+    const source = pick("source") || (title.includes(" - ") ? title.split(" - ").pop() : "");
+    if (source && title.endsWith(" - " + source)) title = title.slice(0, -(source.length + 3));
+    const description = pick("description");
+    if (title && link) items.push({ title, link, source, pubDate, description });
+  }
+  return items;
+}
+
+// Lightly classify a headline into one of our keyword clusters.
+function classifyHeadline(text) {
+  const t = text.toLowerCase();
+  if (/price target|upgrade|downgrade|analyst|rating|outperform|underperform|overweight|buy rating|sell rating/.test(t)) return "analystMoves";
+  if (/stake|13f|13g|13d|hedge fund|institutional|blackrock|vanguard|citadel|activist|position/.test(t)) return "institutionPositionChange";
+  if (/insider|form 4|ceo (bought|sold|purchas)|executive (buy|sell)|director (bought|sold)/.test(t)) return "insiderActivity";
+  if (/short (interest|seller|attack|squeeze)|options|call sweep|put |block trade|dark pool/.test(t)) return "aggressiveMoves";
+  if (/etf (inflow|outflow)|fund flow|index (inclusion|exclusion)|rebalanc/.test(t)) return "capitalFlow";
+  return "sentimentShift";
+}
+
+async function fetchGoogleNewsSignals(ticker) {
+  try {
+    const query = `${ticker} stock (analyst OR upgrade OR downgrade OR "price target" OR insider OR "hedge fund" OR institutional OR stake OR earnings)`;
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query + " when:7d")}&hl=en-US&gl=US&ceid=US:en`;
+    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!r.ok) return [];
+    const xml = await r.text();
+    const now = Date.now();
+    return parseGoogleNewsRss(xml)
+      .filter(n => { const t = new Date(n.pubDate).getTime(); return t && (now - t) < NEWS_MAX_AGE_MS; })
+      .slice(0, 25)
+      .map(n => ({
+        source: n.source || "Google News",
+        headline: n.title,
+        url: n.link,
+        text: n.title + " " + (n.description || ""),
+        sentiment: null,            // inferred from text in computeSignalScore
+        publishedAt: n.pubDate,
+        engagement: 0,
+        cluster: classifyHeadline(n.title + " " + (n.description || "")),
+      }));
+  } catch { return []; }
+}
+
 // ─── INFER SENTIMENT FROM TEXT ───────────────────────────────────
 // For signals where no sentiment score is provided, infer from text
 // using the same lexicon pattern as the existing sentiment endpoint.
@@ -626,16 +689,17 @@ async function applyLearnedCredibility(scored) {
 export async function gatherSignalsV2(ticker) {
   ticker = ticker.toUpperCase().trim();
 
-  // 1) Fetch all sources in parallel (including Twitter)
-  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw] = await Promise.all([
+  // 1) Fetch all sources in parallel (including keyless Google News + Twitter)
+  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw, googleNewsRaw] = await Promise.all([
     fetchInsiderTransactions(ticker),
     fetchNewsSignals(ticker, KEYWORD_CLUSTERS),
     fetchRedditSignals(ticker),
     fetchAnalystSignals(ticker),
     fetchTwitterSignalsSafe(ticker, KEYWORD_CLUSTERS),
+    fetchGoogleNewsSignals(ticker),
   ]);
 
-  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw];
+  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw, ...googleNewsRaw];
   if (allRaw.length === 0) return buildEmptySignal(ticker);
 
   // 2) Infer missing sentiment
@@ -679,7 +743,7 @@ export async function gatherSignalsV2(ticker) {
     totalSignals: scored.length,
     sourceBreakdown: {
       sec: insiderRaw.length,
-      news: newsRaw.length,
+      news: newsRaw.length + googleNewsRaw.length,
       reddit: redditRaw.length,
       analyst: analystRaw.length,
       twitter: twitterRaw.length,
