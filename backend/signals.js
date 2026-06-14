@@ -224,6 +224,8 @@ function engagementWeight(engagement = 0) {
 // ─── RESOLVE SOURCE KEY ─────────────────────────────────────────
 function resolveSourceKey(sourceName = "") {
   const s = sourceName.toLowerCase().replace(/[^a-z_]/g, "");
+  if (s.startsWith("secform"))  return "sec_form4";   // "SEC Form 4" → ground truth
+  if (s.startsWith("sec"))      return "sec_13f";     // "SEC 13F"   → ground truth
   if (s.includes("reuters"))    return "reuters";
   if (s.includes("bloomberg"))  return "bloomberg";
   if (s.includes("financialtimes") || s.includes("ft")) return "financial_times";
@@ -660,6 +662,17 @@ async function fetchTwitterSignalsSafe(ticker, clusters) {
   } catch { return []; }
 }
 
+// ─── INSTITUTIONAL POSITIONING ───────────────────────────────────
+// Dynamic import so the engine still works if institutions.js is absent.
+// Returns { positioning, signals } or null. For US tickers the Yahoo
+// symbol equals the ticker; non-US 13F coverage is sparse anyway.
+async function fetchInstitutionsSafe(ticker) {
+  try {
+    const { fetchInstitutionalPositioning } = await import("./institutions.js");
+    return await fetchInstitutionalPositioning(ticker);
+  } catch { return null; }
+}
+
 // ─── APPLY LEARNED CREDIBILITY ADJUSTMENTS ───────────────────────
 // After the tracker has seen 10+ signals from a source, its accuracy
 // adjusts the base credibility score. This is how the system learns.
@@ -689,17 +702,19 @@ async function applyLearnedCredibility(scored) {
 export async function gatherSignalsV2(ticker) {
   ticker = ticker.toUpperCase().trim();
 
-  // 1) Fetch all sources in parallel (including keyless Google News + Twitter)
-  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw, googleNewsRaw] = await Promise.all([
+  // 1) Fetch all sources in parallel (keyless Google News + institutional 13F + Twitter)
+  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw, googleNewsRaw, instData] = await Promise.all([
     fetchInsiderTransactions(ticker),
     fetchNewsSignals(ticker, KEYWORD_CLUSTERS),
     fetchRedditSignals(ticker),
     fetchAnalystSignals(ticker),
     fetchTwitterSignalsSafe(ticker, KEYWORD_CLUSTERS),
     fetchGoogleNewsSignals(ticker),
+    fetchInstitutionsSafe(ticker),
   ]);
+  const institutionalRaw = instData?.signals || [];
 
-  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw, ...googleNewsRaw];
+  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw, ...googleNewsRaw, ...institutionalRaw];
   if (allRaw.length === 0) return buildEmptySignal(ticker);
 
   // 2) Infer missing sentiment
@@ -742,12 +757,13 @@ export async function gatherSignalsV2(ticker) {
     corroborationMultiplier: +corrMult.toFixed(2),
     totalSignals: scored.length,
     sourceBreakdown: {
-      sec: insiderRaw.length,
+      sec: insiderRaw.length + institutionalRaw.length,
       news: newsRaw.length + googleNewsRaw.length,
       reddit: redditRaw.length,
       analyst: analystRaw.length,
       twitter: twitterRaw.length,
     },
+    institutionalPositioning: instData?.positioning || null,
     bullSignals: bullSignals.length,
     bearSignals: bearSignals.length,
     neutralSignals: neutSignals.length,

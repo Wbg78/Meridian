@@ -247,6 +247,9 @@ export default function ResearchConsole({ token }) {
       {/* ── Positioning signals ── */}
       {result?.positioningSignal && <SignalPanel signal={result.positioningSignal} anomalies={result.anomalies} />}
 
+      {/* ── Institutional positioning (13F holders + insiders) ── */}
+      {result?.positioningSignal?.institutionalPositioning && <InstitutionalPanel ip={result.positioningSignal.institutionalPositioning} />}
+
       {/* ── Impact dossier ── */}
       {result?.impact && <ImpactDossier impact={result.impact} />}
 
@@ -421,6 +424,85 @@ function SignalPanel({ signal, anomalies = [] }) {
               ))}</div>
             </Card>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Institutional positioning — each major holder's current stake, dollar
+// value, and quarter-over-quarter change, plus insider net buying. The
+// "net" verdict is stake × recency × direction weighted (big holders adding
+// count more than small holders trimming).
+function InstitutionalPanel({ ip }) {
+  const fmtB = (v) => (v == null ? "—" : Math.abs(v) >= 1e9 ? "$" + (v / 1e9).toFixed(1) + "B" : Math.abs(v) >= 1e6 ? "$" + (v / 1e6).toFixed(0) + "M" : "$" + v);
+  const moveColor = (d) => (d === "accumulating" ? "green" : d === "trimming" ? "red" : "gray");
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label>Institutional positioning · 13F holders + insiders</Label>
+        <Pill color={dirColor(ip.netInstitutionalDirection)}>net {ip.netInstitutionalDirection}</Pill>
+      </div>
+
+      <Card accent>
+        <div className="grid grid-cols-3 gap-2">
+          {[["Inst. owned", ip.institutionsPercentHeld != null ? ip.institutionsPercentHeld + "%" : "—"],
+            ["Filers", ip.institutionsCount != null ? ip.institutionsCount.toLocaleString() : "—"],
+            ["Insiders own", ip.insidersPercentHeld != null ? ip.insidersPercentHeld + "%" : "—"]].map(([k, v]) => (
+            <div key={k} className="bg-[var(--bg)] border border-[var(--border)] rounded-xl p-2">
+              <p className="text-[var(--muted)] text-[9px] uppercase">{k}</p>
+              <p className="text-[var(--text)] text-sm font-bold">{v}</p>
+            </div>
+          ))}
+        </div>
+        {ip.summary && <p className="text-[var(--muted)] text-[11px] mt-2 leading-relaxed">{ip.summary}</p>}
+        {ip.insiderNetPercent != null && (
+          <p className="text-[11px] mt-1.5">
+            <span className="text-[var(--muted)]">Insider net activity: </span>
+            <span className={ip.insiderDirection === "bullish" ? "text-emerald-400 font-bold" : ip.insiderDirection === "bearish" ? "text-red-400 font-bold" : "text-[var(--muted)]"}>
+              {ip.insiderNetPercent >= 0 ? "+" : ""}{ip.insiderNetPercent}% ({ip.insiderDirection})
+            </span>
+          </p>
+        )}
+      </Card>
+
+      {/* top holders table */}
+      {ip.topHolders?.length > 0 && (
+        <div>
+          <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest mb-1.5">Top holders · current position</p>
+          <div className="space-y-1.5">
+            {ip.topHolders.map((h, i) => (
+              <div key={i} className="flex items-center gap-2 bg-[var(--card)] border border-[var(--border)] rounded-xl px-3 py-2">
+                <span className="text-[var(--text)] text-xs font-semibold truncate flex-1">{h.name}</span>
+                <span className="text-[var(--muted)] text-[10px] w-12 text-right flex-shrink-0">{h.pctHeld != null ? h.pctHeld + "%" : "—"}</span>
+                <span className="text-[var(--muted)] text-[10px] w-14 text-right flex-shrink-0">{fmtB(h.value)}</span>
+                {h.pctChange != null && (
+                  <span className={`text-[10px] w-12 text-right flex-shrink-0 font-bold ${h.pctChange > 0 ? "text-emerald-400" : h.pctChange < 0 ? "text-red-400" : "text-[var(--muted)]"}`}>
+                    {h.pctChange > 0 ? "+" : ""}{h.pctChange}%
+                  </span>
+                )}
+                <Pill color={moveColor(h.direction)}>{h.direction}</Pill>
+              </div>
+            ))}
+          </div>
+          <p className="text-[var(--muted)] text-[9px] mt-1.5 italic">% = share of company held · $ = position value · last column = quarter-over-quarter change</p>
+        </div>
+      )}
+
+      {/* recent insider transactions */}
+      {ip.recentInsiderTx?.length > 0 && (
+        <div>
+          <p className="text-[var(--muted)] text-[10px] uppercase tracking-widest mb-1.5">Recent insider transactions</p>
+          <div className="space-y-1.5">
+            {ip.recentInsiderTx.map((t, i) => (
+              <div key={i} className="flex items-center gap-2 bg-[var(--card)] border border-[var(--border)] rounded-xl px-3 py-2">
+                <Pill color={t.action === "BUY" ? "green" : t.action === "SELL" ? "red" : "gray"}>{t.action}</Pill>
+                <span className="text-[var(--text)] text-xs truncate flex-1">{t.filer}<span className="text-[var(--muted)]">{t.relation ? " · " + t.relation : ""}</span></span>
+                {t.value != null && <span className="text-[var(--muted)] text-[10px] flex-shrink-0">{fmtB(t.value)}</span>}
+                {t.date && <span className="text-[var(--muted)] text-[10px] flex-shrink-0">{t.date}</span>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
