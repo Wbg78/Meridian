@@ -23,3 +23,17 @@ services:
         value: Meridian/1.0 willebg91@outlook.com
       - key: RESEARCH_MODEL
         value: claude-sonnet-4-6
+      # ── The Eye (set values in Render dashboard) ──
+      - key: COPERNICUS_USER      # Sentinel-2 imagery (Operations panel)
+        sync: false
+      - key: COPERNICUS_PASS
+        sync: false
+      - key: EPO_OPS_KEY          # patent search (Patents panel)
+        sync: false
+      - key: EPO_OPS_SECRET
+        sync: false
+      # Optional upgrades:
+      - key: SH_CLIENT_ID         # Sentinel Hub → true-color vision analysis
+        sync: false
+      - key: SH_CLIENT_SECRET
+        sync: false
