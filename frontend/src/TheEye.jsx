@@ -81,116 +81,175 @@ function Tag({ children, color }) {
   );
 }
 
+// ─── SGP4 propagation (satellite.js, loaded via CDN as window.satellite) ──
+function propagateSat(satrec, date) {
+  try {
+    const pv = window.satellite.propagate(satrec, date);
+    if (!pv || !pv.position) return null;
+    const gmst = window.satellite.gstime(date);
+    const geo = window.satellite.eciToGeodetic(pv.position, gmst);
+    const lat = window.satellite.degreesLat(geo.latitude);
+    const lon = window.satellite.degreesLong(geo.longitude);
+    const alt = geo.height * 1000;  // km → m
+    if (!isFinite(lat) || !isFinite(lon) || !isFinite(alt)) return null;
+    return { lat, lon, alt };
+  } catch { return null; }
+}
+
 // ─── CesiumJS Globe ─────────────────────────────────────────────
-function Globe({ data, onFacilityClick }) {
+function Globe({ data, satellites, onFacilityClick, onSatClick }) {
   const ref = useRef(null);
   const viewerRef = useRef(null);
+  const dataEntsRef = useRef([]);    // ISS / conflicts / launch-pad entities
+  const satEntsRef = useRef([]);     // [{ satrec, ent }]
+  const onSatClickRef = useRef(onSatClick);
+  onSatClickRef.current = onSatClick;  // keep click handler fresh w/o re-init
 
+  // ── Init the viewer exactly once ──
   useEffect(() => {
-    if (!ref.current || !window.Cesium) return;
-    if (viewerRef.current) return;  // already initialized
+    if (!ref.current || !window.Cesium || viewerRef.current) return;
 
-    // Set Ion token if available (optional, enables high-res imagery)
     if (import.meta.env.VITE_CESIUM_ION_TOKEN) {
       window.Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN;
     }
 
     const viewer = new window.Cesium.Viewer(ref.current, {
-      animation: false,
-      baseLayerPicker: false,
-      fullscreenButton: false,
-      geocoder: false,
-      homeButton: false,
-      infoBox: false,
-      sceneModePicker: false,
-      selectionIndicator: false,
-      timeline: false,
-      navigationHelpButton: false,
-      // NOTE: Cesium 1.118 removed the `imageryProvider` constructor option;
-      // we set the base layer explicitly below instead.
+      animation: false, baseLayerPicker: false, fullscreenButton: false,
+      geocoder: false, homeButton: false, infoBox: false, sceneModePicker: false,
+      selectionIndicator: false, timeline: false, navigationHelpButton: false,
+      // Cesium 1.118 removed the `imageryProvider` constructor option; set below.
     });
 
-    // Base imagery: prefer Cesium Ion world imagery (token set above),
-    // fall back to OpenStreetMap so the globe is never a blank sphere.
+    // Base imagery: bundled Natural Earth II (no token, can't fail) first, then
+    // overlay Ion high-res world imagery if a token is present. Guarantees the
+    // globe always has a texture (so zoom always shows real terrain).
     (async () => {
+      const layers = viewer.imageryLayers;
       try {
-        viewer.imageryLayers.removeAll();
-        if (import.meta.env.VITE_CESIUM_ION_TOKEN) {
-          viewer.imageryLayers.addImageryProvider(await window.Cesium.createWorldImageryAsync());
-        } else {
-          viewer.imageryLayers.addImageryProvider(
-            new window.Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
-          );
-        }
-      } catch {
-        try {
-          viewer.imageryLayers.addImageryProvider(
-            new window.Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
-          );
-        } catch { /* leave base globe color */ }
+        layers.removeAll();
+        layers.addImageryProvider(
+          await window.Cesium.TileMapServiceImageryProvider.fromUrl(
+            window.Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII")
+          )
+        );
+      } catch { /* keep globe base color */ }
+      if (import.meta.env.VITE_CESIUM_ION_TOKEN) {
+        try { layers.addImageryProvider(await window.Cesium.createWorldImageryAsync()); }
+        catch { /* Ion overlay optional */ }
       }
     })();
 
-    // Dark atmosphere
     viewer.scene.skyAtmosphere.show = true;
     viewer.scene.skyBox.show = true;
     viewer.scene.backgroundColor = new window.Cesium.Color(0.01, 0.02, 0.05, 1.0);
     viewer.scene.globe.baseColor = new window.Cesium.Color(0.02, 0.05, 0.12, 1.0);
-
-    // Tilt to nice angle
     viewer.camera.setView({
       destination: window.Cesium.Cartesian3.fromDegrees(20, 20, 20000000),
     });
 
-    viewerRef.current = viewer;
+    // Click a satellite → bubble its info up to the panel
+    const handler = new window.Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((click) => {
+      const picked = viewer.scene.pick(click.position);
+      const sat = picked?.id?.properties?.sat?.getValue?.(window.Cesium.JulianDate.now());
+      if (sat && onSatClickRef.current) onSatClickRef.current(sat);
+    }, window.Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-    // Add ISS position if available
+    viewerRef.current = viewer;
+    return () => {
+      handler.destroy();
+      if (viewerRef.current && !viewerRef.current.isDestroyed()) viewerRef.current.destroy();
+      viewerRef.current = null;
+    };
+  }, []);
+
+  // ── Data markers (ISS / conflicts / launch pads) — rebuild when data loads ──
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed() || !window.Cesium || !data) return;
+    dataEntsRef.current.forEach(e => viewer.entities.remove(e));
+    dataEntsRef.current = [];
+    const add = (opts) => { const e = viewer.entities.add(opts); dataEntsRef.current.push(e); return e; };
+
     if (data?.iss?.position) {
       const { lat, lon } = data.iss.position;
-      viewer.entities.add({
-        position: window.Cesium.Cartesian3.fromDegrees(+lon, +lat, 400000),
-        point: { pixelSize: 10, color: window.Cesium.Color.fromCssColorString(T.green), outlineColor: window.Cesium.Color.WHITE, outlineWidth: 1 },
+      if (isFinite(+lat) && isFinite(+lon)) add({
+        position: window.Cesium.Cartesian3.fromDegrees(+lon, +lat, 420000),
+        point: { pixelSize: 11, color: window.Cesium.Color.fromCssColorString(T.green), outlineColor: window.Cesium.Color.WHITE, outlineWidth: 1 },
         label: { text: "ISS", font: "10px monospace", fillColor: window.Cesium.Color.fromCssColorString(T.green), pixelOffset: new window.Cesium.Cartesian2(0, -18) },
       });
     }
-
-    // Add conflict zones
     (data?.conflicts || []).forEach(c => {
-      if (!c.lat || !c.lon) return;
-      const color = c.intensity === "high" ? T.red : c.intensity === "medium" ? T.amber : "#ff666666";
-      viewer.entities.add({
+      if (!isFinite(+c.lat) || !isFinite(+c.lon)) return;
+      const color = c.intensity === "high" ? T.red : c.intensity === "medium" ? T.amber : "#ff6666";
+      add({
         position: window.Cesium.Cartesian3.fromDegrees(+c.lon, +c.lat),
         ellipse: {
           semiMinorAxis: c.intensity === "high" ? 300000 : 150000,
           semiMajorAxis: c.intensity === "high" ? 300000 : 150000,
           material: window.Cesium.Color.fromCssColorString(color).withAlpha(0.25),
-          outline: true,
-          outlineColor: window.Cesium.Color.fromCssColorString(color),
+          outline: true, outlineColor: window.Cesium.Color.fromCssColorString(color),
         },
         label: { text: c.name, font: "9px monospace", fillColor: window.Cesium.Color.fromCssColorString(color), pixelOffset: new window.Cesium.Cartesian2(0, -20) },
       });
     });
-
-    // Add launch pads
     (data?.launches || []).forEach(l => {
-      if (!l.padLat || !l.padLon) return;
-      viewer.entities.add({
+      if (!isFinite(+l.padLat) || !isFinite(+l.padLon)) return;
+      add({
         position: window.Cesium.Cartesian3.fromDegrees(+l.padLon, +l.padLat),
         point: { pixelSize: 6, color: window.Cesium.Color.fromCssColorString(T.blue), outlineColor: window.Cesium.Color.WHITE, outlineWidth: 1 },
       });
     });
+  }, [data]);
+
+  // ── Live satellites (SGP4) — render points + tick positions every 3s ──
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed() || !window.Cesium || !window.satellite || !satellites?.length) return;
+    satEntsRef.current.forEach(({ ent }) => viewer.entities.remove(ent));
+    satEntsRef.current = [];
+
+    const recs = [];
+    const now = new Date();
+    satellites.forEach(s => {
+      let satrec;
+      try { satrec = window.satellite.twoline2satrec(s.tle1, s.tle2); } catch { return; }
+      const p = propagateSat(satrec, now);
+      if (!p) return;
+      const ent = viewer.entities.add({
+        position: window.Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt),
+        point: {
+          pixelSize: s.group === "stations" ? 8 : 4,
+          color: window.Cesium.Color.fromCssColorString(s.color || "#00d4ff"),
+          outlineColor: window.Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1,
+        },
+        properties: { sat: { name: s.name, operator: s.operator, country: s.country, group: s.group, color: s.color } },
+      });
+      recs.push({ satrec, ent });
+    });
+    satEntsRef.current = recs;
+
+    const timer = setInterval(() => {
+      const v = viewerRef.current;
+      if (!v || v.isDestroyed()) return;
+      const t = new Date();
+      recs.forEach(({ satrec, ent }) => {
+        const p = propagateSat(satrec, t);
+        if (p) ent.position = window.Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt);
+      });
+    }, 3000);
 
     return () => {
-      if (viewerRef.current && !viewerRef.current.isDestroyed()) {
-        viewerRef.current.destroy();
-        viewerRef.current = null;
-      }
+      clearInterval(timer);
+      const v = viewerRef.current;
+      if (v && !v.isDestroyed()) recs.forEach(({ ent }) => v.entities.remove(ent));
+      satEntsRef.current = [];
     };
-  }, []);
+  }, [satellites]);
 
-  // Add facility markers when requested
+  // Add facility markers when requested (from globe search)
   const addFacilityMarkers = useCallback((locations) => {
-    if (!viewerRef.current || !window.Cesium) return;
+    if (!viewerRef.current || viewerRef.current.isDestroyed() || !window.Cesium) return;
     locations.forEach(loc => {
       viewerRef.current.entities.add({
         position: window.Cesium.Cartesian3.fromDegrees(loc.lon, loc.lat),
@@ -200,16 +259,14 @@ function Globe({ data, onFacilityClick }) {
     });
   }, []);
 
-  // Fly to a location
   const flyTo = useCallback((lat, lon, alt = 2000000) => {
-    if (!viewerRef.current || !window.Cesium) return;
+    if (!viewerRef.current || viewerRef.current.isDestroyed() || !window.Cesium) return;
     viewerRef.current.camera.flyTo({
       destination: window.Cesium.Cartesian3.fromDegrees(lon, lat, alt),
       duration: 2.5,
     });
   }, []);
 
-  // Expose methods to parent via ref
   useEffect(() => {
     if (onFacilityClick) onFacilityClick({ addFacilityMarkers, flyTo });
   }, [addFacilityMarkers, flyTo, onFacilityClick]);
@@ -513,6 +570,8 @@ export default function TheEye({ token }) {
   const [fullscreen, setFullscreen] = useState(false);
   const [activePanel, setActivePanel] = useState("space");
   const [data, setData] = useState(null);
+  const [satellites, setSatellites] = useState([]);
+  const [selectedSat, setSelectedSat] = useState(null);
   const [loading, setLoading] = useState(true);
   const globeControlsRef = useRef(null);
 
@@ -521,6 +580,13 @@ export default function TheEye({ token }) {
     fetch(`${BACKEND}/api/space/overview`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json()).then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
+  }, [token]);
+
+  // Live satellites for the globe (fetched once; SGP4-propagated client-side)
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${BACKEND}/api/space/satellites`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setSatellites(Array.isArray(d) ? d : [])).catch(() => {});
   }, [token]);
 
   function handleSearchResult(result) {
@@ -670,8 +736,46 @@ export default function TheEye({ token }) {
         <div style={{ flex: 1, position: "relative" }}>
           <Globe
             data={data}
+            satellites={satellites}
             onFacilityClick={controls => { globeControlsRef.current = controls; }}
+            onSatClick={setSelectedSat}
           />
+
+          {/* Satellite count badge */}
+          {satellites.length > 0 && (
+            <div style={{
+              position: "absolute", bottom: 12, left: 12,
+              fontFamily: T.mono, fontSize: 10, color: T.muted,
+              background: `${T.bg}cc`, border: `1px solid ${T.border}`,
+              borderRadius: 2, padding: "4px 10px",
+            }}>
+              <Dot color={T.cyan} />{satellites.length} satellites tracked · click one
+            </div>
+          )}
+
+          {/* Clicked-satellite info card */}
+          {selectedSat && (
+            <div style={{
+              position: "absolute", bottom: 12, right: 12, width: 240,
+              background: `${T.bg}f2`, border: `1px solid ${selectedSat.color || T.cyan}`,
+              borderRadius: 4, padding: "12px 14px", boxShadow: `0 0 20px ${selectedSat.color || T.cyan}33`,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: selectedSat.color || T.cyan, textTransform: "uppercase" }}>Satellite</div>
+                <span onClick={() => setSelectedSat(null)} style={{ cursor: "pointer", color: T.muted, fontSize: 12, lineHeight: 1 }}>✕</span>
+              </div>
+              <div style={{ color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{selectedSat.name}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <span style={{ color: T.muted, fontSize: 10 }}>Operator</span>
+                <span style={{ color: T.text, fontSize: 10, fontFamily: T.mono, textAlign: "right" }}>{selectedSat.operator}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: T.muted, fontSize: 10 }}>Country</span>
+                <span style={{ color: T.text, fontSize: 10, fontFamily: T.mono }}>{selectedSat.country}</span>
+              </div>
+            </div>
+          )}
+
           {/* Overlay: active panel on top of globe if not space */}
           {activePanel === "ops" && (
             <div style={{

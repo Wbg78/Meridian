@@ -101,10 +101,24 @@ async function fetchUpcomingLaunches(limit = 10) {
 }
 
 // ─── CELESTRAK — Satellite TLE data ─────────────────────────────
-// Free, no auth. Returns TLE data for satellite groups.
-// We use the JSON endpoint for easier parsing.
-const CELESTRAK = "https://celestrak.org/SOCRATES/query.php";
-const CELESTRAK_JSON = "https://celestrak.org/SATCAT/records.php";
+// Free, no auth. The GP (General Perturbations) API returns current
+// TLEs per group; the frontend propagates them with SGP4 (satellite.js)
+// to draw live satellite positions on the globe.
+const CELESTRAK_GP = "https://celestrak.org/NORAD/elements/gp.php";
+
+// Curated operator set for the globe. Each entry maps a CelesTrak GROUP
+// to the operator/owner + a display colour, and caps how many we render
+// (keeps the globe ~200 sats total — light + meaningful, not 30k).
+const SAT_OPERATORS = [
+  { group: "stations",  operator: "ISS / CSS (crewed)",        country: "International", color: "#ffffff", cap: 6  },
+  { group: "gps-ops",   operator: "US Space Force — GPS",      country: "USA",          color: "#0066ff", cap: 31 },
+  { group: "galileo",   operator: "EU / ESA — Galileo",        country: "EU",           color: "#aa44ff", cap: 28 },
+  { group: "glo-ops",   operator: "Roscosmos — GLONASS",       country: "Russia",       color: "#ff3355", cap: 24 },
+  { group: "beidou",    operator: "CNSA — BeiDou",             country: "China",        color: "#ffaa00", cap: 25 },
+  { group: "starlink",  operator: "SpaceX — Starlink",         country: "USA",          color: "#00d4ff", cap: 45 },
+  { group: "oneweb",    operator: "OneWeb",                    country: "UK",           color: "#00ff88", cap: 30 },
+  { group: "geo",       operator: "Geostationary (mixed)",     country: "Various",      color: "#888888", cap: 18 },
+];
 
 // Fetch active satellite catalog (count + metadata)
 async function fetchSatelliteCatalog() {
@@ -139,24 +153,14 @@ async function fetchSatelliteCatalog() {
   };
 }
 
-// Fetch TLE data for a specific group for 3D rendering
+// Fetch TLEs for one CelesTrak GROUP (3-line TLE text → parsed objects).
 async function fetchTLEGroup(group = "starlink") {
   const r = await fetch(
-    `https://celestrak.org/SOCRATES/query.php?CATNR=&format=json&GROUP=${group}`,
+    `${CELESTRAK_GP}?GROUP=${encodeURIComponent(group)}&FORMAT=tle`,
     { headers: { "User-Agent": "Meridian/1.0" } }
   );
-  if (!r.ok) {
-    // Fallback: get TLE text format and parse it
-    const r2 = await fetch(
-      `https://celestrak.org/SOCRATES/query.php?GROUP=${group}&FORMAT=TLE`,
-      { headers: { "User-Agent": "Meridian/1.0" } }
-    );
-    if (!r2.ok) return [];
-    const text = await r2.text();
-    return parseTLEText(text);
-  }
-  const data = await r.json();
-  return Array.isArray(data) ? data : [];
+  if (!r.ok) return [];
+  return parseTLEText(await r.text());
 }
 
 function parseTLEText(text) {
@@ -166,6 +170,31 @@ function parseTLEText(text) {
     if (!lines[i + 1]?.startsWith("1 ") || !lines[i + 2]?.startsWith("2 ")) continue;
     sats.push({ name: lines[i], tle1: lines[i + 1], tle2: lines[i + 2] });
   }
+  return sats;
+}
+
+// Build the curated multi-operator satellite set for the globe.
+// Returns ~200 sats tagged with operator + colour for SGP4 rendering.
+async function fetchSatelliteSet() {
+  const results = await Promise.allSettled(
+    SAT_OPERATORS.map(op => fetchTLEGroup(op.group))
+  );
+  const sats = [];
+  results.forEach((res, i) => {
+    if (res.status !== "fulfilled") return;
+    const op = SAT_OPERATORS[i];
+    res.value.slice(0, op.cap).forEach(s => {
+      sats.push({
+        name: s.name,
+        tle1: s.tle1,
+        tle2: s.tle2,
+        operator: op.operator,
+        country: op.country,
+        color: op.color,
+        group: op.group,
+      });
+    });
+  });
   return sats;
 }
 
@@ -454,6 +483,12 @@ spaceRouter.get("/tle/:group", async (req, res) => {
     const group = req.params.group || "starlink";
     res.json(await cached(`tle_${group}`, TTL.satellites, () => fetchTLEGroup(group)));
   } catch (e) { res.status(500).json({ error: String(e.message) }); }
+});
+
+// Curated multi-operator satellite set for the globe (~200 sats, SGP4-ready)
+spaceRouter.get("/satellites", async (req, res) => {
+  try { res.json(await cached("satset", TTL.satellites, () => fetchSatelliteSet())); }
+  catch (e) { res.status(500).json({ error: String(e.message) }); }
 });
 
 spaceRouter.get("/search", async (req, res) => {

@@ -34,47 +34,66 @@ const CACHE_TTL = 7 * 24 * 3600_000;  // 7 days per facility
 const CLAUDE_KEY = process.env.ANTHROPIC_API_KEY;
 
 // ─── FACILITY REGISTRY ──────────────────────────────────────────
+// ~50 strategically significant facilities of major public companies.
+// Each is scannable from the Operations panel (Sentinel-2 + analysis).
 export const FACILITIES = {
-  "TSMC_TAINAN": {
-    name: "TSMC Tainan Fab Complex",
-    company: "TSMC", ticker: "TSM",
-    lat: 24.7741, lon: 120.9773,
-    type: "semiconductor_fab",
-    region: "Taiwan",
-    strategicNote: "World's most advanced chip production. N3/N2 process node.",
-  },
-  "TSMC_ARIZONA": {
-    name: "TSMC Arizona Fab 21",
-    company: "TSMC", ticker: "TSM",
-    lat: 33.5186, lon: -111.9253,
-    type: "semiconductor_fab",
-    region: "United States",
-    strategicNote: "CHIPS Act beneficiary. N4 process. $40B investment.",
-  },
-  "INTEL_CHANDLER": {
-    name: "Intel Chandler Campus",
-    company: "Intel", ticker: "INTC",
-    lat: 33.4484, lon: -112.1185,
-    type: "semiconductor_fab",
-    region: "United States",
-    strategicNote: "Intel Foundry Services flagship. 18A process node.",
-  },
-  "SAMSUNG_HWASEONG": {
-    name: "Samsung Hwaseong Campus",
-    company: "Samsung", ticker: "005930.KS",
-    lat: 37.1928, lon: 127.0747,
-    type: "semiconductor_fab",
-    region: "South Korea",
-    strategicNote: "Memory + Logic. HBM3E production critical for AI.",
-  },
-  "NVIDIA_HQ": {
-    name: "Nvidia HQ",
-    company: "Nvidia", ticker: "NVDA",
-    lat: 37.3671, lon: -121.9677,
-    type: "headquarters",
-    region: "United States",
-    strategicNote: "Fabless. Monitors for workforce + expansion activity.",
-  },
+  // ── Semiconductors ──
+  "TSMC_TAINAN":     { name: "TSMC Tainan Fab Complex",      company: "TSMC",        ticker: "TSM",       lat: 24.7741, lon: 120.9773, type: "semiconductor_fab", region: "Taiwan",        strategicNote: "World's most advanced chip production. N3/N2 process node." },
+  "TSMC_ARIZONA":    { name: "TSMC Arizona Fab 21",          company: "TSMC",        ticker: "TSM",       lat: 33.5186, lon: -111.9253, type: "semiconductor_fab", region: "United States", strategicNote: "CHIPS Act beneficiary. N4 process. $40B investment." },
+  "INTEL_CHANDLER":  { name: "Intel Ocotillo (Chandler)",    company: "Intel",       ticker: "INTC",      lat: 33.2658, lon: -111.8088, type: "semiconductor_fab", region: "United States", strategicNote: "Intel Foundry flagship. 18A/20A process node." },
+  "INTEL_OHIO":      { name: "Intel Ohio (New Albany)",      company: "Intel",       ticker: "INTC",      lat: 40.0617, lon: -82.7674, type: "semiconductor_fab", region: "United States", strategicNote: "$28B+ mega-fab build-out. Watch construction pace." },
+  "SAMSUNG_HWASEONG":{ name: "Samsung Hwaseong Campus",      company: "Samsung",     ticker: "005930.KS", lat: 37.1928, lon: 127.0747, type: "semiconductor_fab", region: "South Korea",   strategicNote: "Memory + Logic. HBM3E production critical for AI." },
+  "SAMSUNG_TAYLOR":  { name: "Samsung Taylor (Texas)",       company: "Samsung",     ticker: "005930.KS", lat: 30.5683, lon: -97.4097, type: "semiconductor_fab", region: "United States", strategicNote: "$17B foundry. Apple/Nvidia advanced-node hopeful." },
+  "SK_HYNIX":        { name: "SK Hynix Icheon",              company: "SK Hynix",    ticker: "000660.KS", lat: 37.2410, lon: 127.4870, type: "semiconductor_fab", region: "South Korea",   strategicNote: "Dominant HBM supplier for Nvidia AI GPUs." },
+  "MICRON_BOISE":    { name: "Micron Boise HQ + Fab",        company: "Micron",      ticker: "MU",        lat: 43.5390, lon: -116.2300, type: "semiconductor_fab", region: "United States", strategicNote: "US memory champion. DRAM/HBM expansion." },
+  "GF_MALTA":        { name: "GlobalFoundries Fab 8",        company: "GlobalFoundries", ticker: "GFS",   lat: 42.9930, lon: -73.8000, type: "semiconductor_fab", region: "United States", strategicNote: "Specialty + defense-grade silicon." },
+  "ASML_VELDHOVEN":  { name: "ASML Veldhoven HQ",            company: "ASML",        ticker: "ASML",      lat: 51.4170, lon: 5.4530,   type: "semiconductor_equipment", region: "Netherlands", strategicNote: "Sole EUV lithography supplier. Chokepoint of chips." },
+  "NVIDIA_HQ":       { name: "Nvidia HQ (Santa Clara)",      company: "Nvidia",      ticker: "NVDA",      lat: 37.3671, lon: -121.9677, type: "headquarters", region: "United States", strategicNote: "Fabless AI leader. Watch campus + workforce growth." },
+  "AMD_HQ":          { name: "AMD HQ (Santa Clara)",         company: "AMD",         ticker: "AMD",       lat: 37.3855, lon: -121.9700, type: "headquarters", region: "United States", strategicNote: "Datacenter + AI accelerator challenger." },
+  "TI_RICHARDSON":   { name: "Texas Instruments RFAB",       company: "Texas Instruments", ticker: "TXN", lat: 32.9680, lon: -96.7460, type: "semiconductor_fab", region: "United States", strategicNote: "Analog leader. 300mm capacity expansion." },
+  "ASE_KAOHSIUNG":   { name: "ASE Kaohsiung (OSAT)",         company: "ASE Technology", ticker: "ASX",    lat: 22.6310, lon: 120.2800, type: "semiconductor_packaging", region: "Taiwan",   strategicNote: "Largest chip packaging/test. CoWoS advanced packaging." },
+
+  // ── EV / Auto / Battery ──
+  "TESLA_FREMONT":   { name: "Tesla Fremont Factory",        company: "Tesla",       ticker: "TSLA",      lat: 37.4935, lon: -121.9450, type: "auto_plant", region: "United States", strategicNote: "Original Tesla plant. Model S/X/3/Y output proxy." },
+  "TESLA_AUSTIN":    { name: "Tesla Giga Texas",             company: "Tesla",       ticker: "TSLA",      lat: 30.2240, lon: -97.6170, type: "auto_plant", region: "United States", strategicNote: "HQ + Cybertruck/Model Y. 4680 cell ramp." },
+  "TESLA_BERLIN":    { name: "Tesla Giga Berlin",            company: "Tesla",       ticker: "TSLA",      lat: 52.3920, lon: 13.8030,  type: "auto_plant", region: "Germany",       strategicNote: "European hub. Watch parking-lot throughput." },
+  "TESLA_SHANGHAI":  { name: "Tesla Giga Shanghai",          company: "Tesla",       ticker: "TSLA",      lat: 30.9120, lon: 121.7200, type: "auto_plant", region: "China",         strategicNote: "Highest-volume Tesla plant. Export hub." },
+  "BYD_SHENZHEN":    { name: "BYD Shenzhen HQ",              company: "BYD",         ticker: "1211.HK",   lat: 22.6560, lon: 114.0480, type: "auto_plant", region: "China",         strategicNote: "World's largest EV maker by volume." },
+  "CATL_NINGDE":     { name: "CATL Ningde Megafactory",      company: "CATL",        ticker: "300750.SZ", lat: 26.6650, lon: 119.5480, type: "battery_plant", region: "China",      strategicNote: "World's #1 EV battery maker (~37% share)." },
+  "RIVIAN_NORMAL":   { name: "Rivian Normal Plant",          company: "Rivian",      ticker: "RIVN",      lat: 40.4760, lon: -88.9520, type: "auto_plant", region: "United States", strategicNote: "EV startup output. R1T/R1S + Amazon vans." },
+  "FORD_ROUGE":      { name: "Ford Rouge Complex",           company: "Ford",        ticker: "F",         lat: 42.3010, lon: -83.1680, type: "auto_plant", region: "United States", strategicNote: "F-150 + Lightning EV production." },
+  "GM_FACTORY_ZERO": { name: "GM Factory ZERO (Detroit)",    company: "General Motors", ticker: "GM",     lat: 42.3760, lon: -83.0410, type: "auto_plant", region: "United States", strategicNote: "GM dedicated EV plant (Hummer EV, Silverado EV)." },
+  "TOYOTA_TSUTSUMI": { name: "Toyota Tsutsumi Plant",        company: "Toyota",      ticker: "TM",        lat: 35.0790, lon: 137.1560, type: "auto_plant", region: "Japan",         strategicNote: "Flagship hybrid/Prius plant. Output proxy." },
+  "VW_WOLFSBURG":    { name: "Volkswagen Wolfsburg",         company: "Volkswagen",  ticker: "VOW3.DE",   lat: 52.4320, lon: 10.7980,  type: "auto_plant", region: "Germany",       strategicNote: "World's largest car plant by area." },
+  "PANASONIC_GIGA":  { name: "Panasonic/Tesla Giga Nevada",  company: "Panasonic",   ticker: "6752.T",    lat: 39.5380, lon: -119.4360, type: "battery_plant", region: "United States", strategicNote: "2170 cell supply for Tesla. Expansion watch." },
+
+  // ── Aerospace & Defense ──
+  "BOEING_EVERETT":  { name: "Boeing Everett Factory",       company: "Boeing",      ticker: "BA",        lat: 47.9220, lon: -122.2810, type: "aerospace_plant", region: "United States", strategicNote: "Widebody (777/767) assembly. Largest building by volume." },
+  "BOEING_RENTON":   { name: "Boeing Renton (737)",          company: "Boeing",      ticker: "BA",        lat: 47.4900, lon: -122.2150, type: "aerospace_plant", region: "United States", strategicNote: "737 MAX line. Watch flight-line inventory." },
+  "AIRBUS_TOULOUSE": { name: "Airbus Toulouse Final Assembly",company: "Airbus",     ticker: "AIR.PA",    lat: 43.6080, lon: 1.3640,   type: "aerospace_plant", region: "France",        strategicNote: "A320/A350 final assembly. Delivery-flow proxy." },
+  "LOCKHEED_FW":     { name: "Lockheed Martin Fort Worth",   company: "Lockheed Martin", ticker: "LMT",   lat: 32.7690, lon: -97.4410, type: "defense_plant", region: "United States", strategicNote: "F-35 assembly line. Defense-demand signal." },
+  "RTX_TUCSON":      { name: "Raytheon Tucson",              company: "RTX",         ticker: "RTX",       lat: 32.1130, lon: -110.8870, type: "defense_plant", region: "United States", strategicNote: "Missiles/munitions. Restock-cycle signal." },
+  "NORTHROP_PALMDALE":{ name: "Northrop Grumman Palmdale",   company: "Northrop Grumman", ticker: "NOC",  lat: 34.6300, lon: -118.0840, type: "defense_plant", region: "United States", strategicNote: "B-21 Raider stealth bomber production." },
+  "SPACEX_STARBASE": { name: "SpaceX Starbase",              company: "SpaceX",      ticker: "PRIVATE",   lat: 25.9970, lon: -97.1560, type: "launch_site", region: "United States", strategicNote: "Starship dev + launch. Cadence of test campaigns." },
+
+  // ── Energy ──
+  "ARAMCO_ABQAIQ":   { name: "Saudi Aramco Abqaiq",         company: "Saudi Aramco", ticker: "2222.SR",  lat: 25.9340, lon: 49.6720,  type: "oil_processing", region: "Saudi Arabia", strategicNote: "World's largest oil processing facility." },
+  "EXXON_BAYTOWN":   { name: "ExxonMobil Baytown",          company: "ExxonMobil",  ticker: "XOM",       lat: 29.7470, lon: -94.9760, type: "refinery", region: "United States", strategicNote: "One of largest US refining/petrochem complexes." },
+  "FIRSTSOLAR_OH":   { name: "First Solar Ohio",            company: "First Solar", ticker: "FSLR",      lat: 41.4870, lon: -83.6900, type: "solar_plant", region: "United States", strategicNote: "Largest US solar-panel manufacturing footprint." },
+
+  // ── Big Tech / Data ──
+  "APPLE_PARK":      { name: "Apple Park",                  company: "Apple",       ticker: "AAPL",      lat: 37.3349, lon: -122.0090, type: "headquarters", region: "United States", strategicNote: "HQ proxy for headcount/expansion sentiment." },
+  "GOOGLE_PLEX":     { name: "Googleplex",                 company: "Alphabet",    ticker: "GOOGL",     lat: 37.4220, lon: -122.0840, type: "headquarters", region: "United States", strategicNote: "HQ; watch datacenter build-outs separately." },
+  "META_HQ":         { name: "Meta HQ (Menlo Park)",       company: "Meta",        ticker: "META",      lat: 37.4850, lon: -122.1480, type: "headquarters", region: "United States", strategicNote: "AI capex + datacenter expansion signal." },
+  "MICROSOFT_RED":   { name: "Microsoft Redmond",          company: "Microsoft",   ticker: "MSFT",      lat: 47.6400, lon: -122.1290, type: "headquarters", region: "United States", strategicNote: "HQ; Azure AI datacenter demand proxy." },
+  "AMAZON_HQ":       { name: "Amazon HQ (Seattle)",        company: "Amazon",      ticker: "AMZN",      lat: 47.6150, lon: -122.3380, type: "headquarters", region: "United States", strategicNote: "AWS + logistics. Fulfillment-network watch." },
+
+  // ── Industrial / Pharma ──
+  "CATERPILLAR_TX":  { name: "Caterpillar HQ (Irving)",     company: "Caterpillar", ticker: "CAT",       lat: 32.8870, lon: -96.9690, type: "headquarters", region: "United States", strategicNote: "Global construction-demand bellwether." },
+  "SIEMENS_BERLIN":  { name: "Siemens Gas Turbine Berlin",  company: "Siemens",     ticker: "SIE.DE",    lat: 52.5320, lon: 13.3290,  type: "industrial_plant", region: "Germany",   strategicNote: "Energy/industrial automation." },
+  "NOVO_KALUNDBORG": { name: "Novo Nordisk Kalundborg",     company: "Novo Nordisk", ticker: "NVO",      lat: 55.6760, lon: 11.0890,  type: "pharma_plant", region: "Denmark",      strategicNote: "GLP-1 (Ozempic/Wegovy) API + fill-finish hub." },
+  "LILLY_INDY":      { name: "Eli Lilly Indianapolis",      company: "Eli Lilly",   ticker: "LLY",       lat: 39.7700, lon: -86.1760, type: "pharma_plant", region: "United States", strategicNote: "Zepbound/Mounjaro capacity build-out." },
+  "PFIZER_KALAMAZOO":{ name: "Pfizer Kalamazoo",            company: "Pfizer",      ticker: "PFE",       lat: 42.2470, lon: -85.5410, type: "pharma_plant", region: "United States", strategicNote: "Largest Pfizer manufacturing site." },
 };
 
 // ─── COPERNICUS SENTINEL-2 ──────────────────────────────────────
