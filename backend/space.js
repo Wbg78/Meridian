@@ -18,6 +18,7 @@
 // ───────────────────────────────────────────────────────────────
 
 import express from "express";
+import { FACILITIES } from "./satellite.js";
 
 export const spaceRouter = express.Router();
 
@@ -134,10 +135,10 @@ async function fetchSatelliteCatalog() {
   lines.forEach(line => {
     const cols = line.split(",");
     if (cols.length < 10) return;
-    const status = cols[8]?.trim();
-    const type = cols[2]?.trim();
-    const country = cols[6]?.trim();
-    if (status === "+") active++;
+    const type = cols[3]?.trim();
+    const status = cols[4]?.trim();
+    const country = cols[5]?.trim();
+    if (status === "+" || status === "P" || status === "B" || status === "S") active++;
     if (type === "DEB") debris++;
     else if (type === "R/B") rocket_bodies++;
     else if (type === "PAY") payload++;
@@ -332,68 +333,31 @@ async function fetchConflictZones() {
 
 // ─── COMPANY SEARCH ─────────────────────────────────────────────
 // When user types "TSMC" or "SpaceX" in the globe search
-const COMPANY_LOCATIONS = {
-  "TSMC": {
-    name: "TSMC", type: "semiconductor",
-    locations: [
-      { name: "TSMC HQ", lat: 24.7741, lon: 120.9773, type: "headquarters" },
-      { name: "TSMC Fab 18 (N5)", lat: 24.7741, lon: 120.9773, type: "fab" },
-      { name: "TSMC Arizona", lat: 33.5186, lon: -111.9253, type: "fab" },
-      { name: "TSMC Japan", lat: 32.8031, lon: 130.7079, type: "fab" },
-    ],
-    intel: "World's largest contract chipmaker. Critical node for AI, defense semiconductors.",
-    riskFlags: ["Taiwan Strait geopolitical risk", "Typhoon exposure", "US-China trade tension"],
-  },
-  "SPACEX": {
-    name: "SpaceX", type: "aerospace",
-    locations: [
-      { name: "SpaceX HQ", lat: 33.9208, lon: -118.3281, type: "headquarters" },
-      { name: "Starbase Texas", lat: 25.9974, lon: -97.1566, type: "launch_site" },
-      { name: "Cape Canaveral SLC-40", lat: 28.5621, lon: -80.5772, type: "launch_site" },
-      { name: "Vandenberg SLC-4E", lat: 34.6328, lon: -120.6110, type: "launch_site" },
-    ],
-    intel: "Dominant commercial launch provider. Starlink constellation reshaping connectivity.",
-    riskFlags: ["FAA regulatory risk", "Competition from ULA/Blue Origin"],
-  },
-  "INTEL": {
-    name: "Intel", type: "semiconductor",
-    locations: [
-      { name: "Intel HQ", lat: 37.3875, lon: -121.9630, type: "headquarters" },
-      { name: "Intel Arizona Fab", lat: 33.4484, lon: -112.1185, type: "fab" },
-      { name: "Intel Ireland", lat: 53.3498, lon: -6.2603, type: "fab" },
-      { name: "Intel Israel", lat: 31.7767, lon: 35.2345, type: "fab" },
-    ],
-    intel: "US semiconductor giant undergoing major fab expansion (IFS strategy).",
-    riskFlags: ["TSMC competition", "Technology execution risk", "Yield challenges"],
-  },
-  "SAMSUNG": {
-    name: "Samsung Electronics", type: "semiconductor",
-    locations: [
-      { name: "Samsung HQ", lat: 37.5133, lon: 127.1028, type: "headquarters" },
-      { name: "Samsung Hwaseong Fab", lat: 37.1928, lon: 127.0747, type: "fab" },
-      { name: "Samsung Taylor Texas", lat: 30.5683, lon: -97.4097, type: "fab" },
-    ],
-    intel: "Korean semiconductor giant. Memory + foundry. Key Apple, Nvidia supplier.",
-    riskFlags: ["North Korea proximity", "Memory cycle exposure", "TSMC competition"],
-  },
-  "PALANTIR": {
-    name: "Palantir Technologies", type: "software",
-    locations: [
-      { name: "Palantir HQ", lat: 39.7392, lon: -104.9903, type: "headquarters" },
-      { name: "Palantir NYC", lat: 40.7128, lon: -74.0060, type: "office" },
-      { name: "Palantir London", lat: 51.5074, lon: -0.1278, type: "office" },
-    ],
-    intel: "AI/data analytics for defense and commercial. Deep US government relationships.",
-    riskFlags: ["Government contract concentration", "AIP commercial adoption pace"],
-  },
-};
+// Build a searchable company → locations index from the Operations
+// facility catalog (satellite.js), so search covers every tracked
+// company/factory (~30 companies, 46 sites) instead of a hand-picked list.
+const COMPANY_LOCATIONS = {};
+for (const f of Object.values(FACILITIES)) {
+  const key = f.company.toUpperCase();
+  if (!COMPANY_LOCATIONS[key]) {
+    COMPANY_LOCATIONS[key] = {
+      name: f.company, ticker: f.ticker, type: f.type,
+      locations: [],
+      intel: f.strategicNote,
+      riskFlags: [],
+    };
+  }
+  COMPANY_LOCATIONS[key].locations.push({
+    name: f.name, lat: f.lat, lon: f.lon, type: f.type, key: Object.keys(FACILITIES).find(k => FACILITIES[k] === f),
+  });
+}
 
 // Search companies/locations for the globe
 function searchLocations(query) {
   const q = query.toUpperCase().trim();
   const matches = [];
   for (const [key, data] of Object.entries(COMPANY_LOCATIONS)) {
-    if (key.includes(q) || data.name.toUpperCase().includes(q)) {
+    if (key.includes(q) || data.name.toUpperCase().includes(q) || data.ticker?.toUpperCase().includes(q)) {
       matches.push(data);
     }
   }

@@ -247,15 +247,19 @@ function Globe({ data, satellites, onFacilityClick, onSatClick }) {
     };
   }, [satellites]);
 
-  // Add facility markers when requested (from globe search)
+  // Add facility markers when requested (from globe search / operator click)
+  const searchEntsRef = useRef([]);
   const addFacilityMarkers = useCallback((locations) => {
     if (!viewerRef.current || viewerRef.current.isDestroyed() || !window.Cesium) return;
+    searchEntsRef.current.forEach(e => viewerRef.current.entities.remove(e));
+    searchEntsRef.current = [];
     locations.forEach(loc => {
-      viewerRef.current.entities.add({
+      const ent = viewerRef.current.entities.add({
         position: window.Cesium.Cartesian3.fromDegrees(loc.lon, loc.lat),
         point: { pixelSize: 12, color: window.Cesium.Color.fromCssColorString(T.cyan), outlineColor: window.Cesium.Color.WHITE, outlineWidth: 2 },
         label: { text: loc.name, font: "10px monospace", fillColor: window.Cesium.Color.fromCssColorString(T.cyan), pixelOffset: new window.Cesium.Cartesian2(0, -22) },
       });
+      searchEntsRef.current.push(ent);
     });
   }, []);
 
@@ -412,7 +416,7 @@ function IntelFeed({ launches }) {
 }
 
 // ─── SATELLITE FACILITIES PANEL ──────────────────────────────────
-function FacilitiesPanel({ token }) {
+function FacilitiesPanel({ token, globeControlsRef }) {
   const [facilities, setFacilities] = useState([]);
   const [selected, setSelected] = useState(null);
   const [analysis, setAnalysis] = useState(null);
@@ -423,9 +427,14 @@ function FacilitiesPanel({ token }) {
       .then(r => r.json()).then(d => setFacilities(Array.isArray(d) ? d : [])).catch(() => {});
   }, [token]);
 
-  async function analyze(key) {
-    setSelected(key); setLoading(true); setAnalysis(null);
-    const r = await fetch(`${BACKEND}/api/satellite/analyze/${key}`, {
+  async function analyze(f) {
+    setSelected(f.key); setLoading(true); setAnalysis(null);
+    if (globeControlsRef.current) {
+      const { addFacilityMarkers, flyTo } = globeControlsRef.current;
+      addFacilityMarkers([{ name: f.name, lat: f.lat, lon: f.lon }]);
+      flyTo(f.lat, f.lon, 600000);
+    }
+    const r = await fetch(`${BACKEND}/api/satellite/analyze/${f.key}`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(r => r.json()).catch(e => ({ error: e.message }));
     setAnalysis(r); setLoading(false);
@@ -435,7 +444,7 @@ function FacilitiesPanel({ token }) {
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 12 }}>
         {facilities.map(f => (
-          <button key={f.key} onClick={() => analyze(f.key)} style={{
+          <button key={f.key} onClick={() => analyze(f)} style={{
             background: selected === f.key ? T.cyanDim : "transparent",
             border: `1px solid ${selected === f.key ? T.cyan : T.border}`,
             color: selected === f.key ? T.cyan : T.muted,
@@ -784,7 +793,7 @@ export default function TheEye({ token }) {
               borderRadius: 4, padding: 14, maxHeight: "calc(100% - 24px)", overflowY: "auto",
             }}>
               <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: T.cyan, textTransform: "uppercase", marginBottom: 12 }}>Operational Intelligence</div>
-              <FacilitiesPanel token={token} />
+              <FacilitiesPanel token={token} globeControlsRef={globeControlsRef} />
             </div>
           )}
           {activePanel === "patents" && (
