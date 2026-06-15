@@ -106,11 +106,30 @@ function Globe({ data, onFacilityClick }) {
       selectionIndicator: false,
       timeline: false,
       navigationHelpButton: false,
-      // Use open imagery (no Ion token needed)
-      imageryProvider: new window.Cesium.TileMapServiceImageryProvider({
-        url: window.Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
-      }),
+      // NOTE: Cesium 1.118 removed the `imageryProvider` constructor option;
+      // we set the base layer explicitly below instead.
     });
+
+    // Base imagery: prefer Cesium Ion world imagery (token set above),
+    // fall back to OpenStreetMap so the globe is never a blank sphere.
+    (async () => {
+      try {
+        viewer.imageryLayers.removeAll();
+        if (import.meta.env.VITE_CESIUM_ION_TOKEN) {
+          viewer.imageryLayers.addImageryProvider(await window.Cesium.createWorldImageryAsync());
+        } else {
+          viewer.imageryLayers.addImageryProvider(
+            new window.Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
+          );
+        }
+      } catch {
+        try {
+          viewer.imageryLayers.addImageryProvider(
+            new window.Cesium.OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })
+          );
+        } catch { /* leave base globe color */ }
+      }
+    })();
 
     // Dark atmosphere
     viewer.scene.skyAtmosphere.show = true;

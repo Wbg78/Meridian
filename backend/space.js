@@ -42,8 +42,11 @@ function cached(key, ttl, fn) {
 const LL2 = "https://ll.thespacedevs.com/2.2.0";
 
 async function fetchRecentLaunches(limit = 20) {
+  // net__lte=now → only launches that have already happened (newest first),
+  // otherwise upcoming launches show up with negative "time ago".
+  const now = new Date().toISOString();
   const r = await fetch(
-    `${LL2}/launch/?format=json&limit=${limit}&ordering=-net&mode=detailed`,
+    `${LL2}/launch/?format=json&limit=${limit}&net__lte=${now}&ordering=-net&mode=detailed`,
     { headers: { "User-Agent": "Meridian/1.0" } }
   );
   if (!r.ok) throw new Error("Launch Library: " + r.status);
@@ -168,14 +171,16 @@ function parseTLEText(text) {
 
 // ─── NASA ISS API ───────────────────────────────────────────────
 async function fetchISSData() {
+  // Position from wheretheiss.at (HTTPS, reliable, returns numeric lat/lon).
+  // open-notify.org is HTTP-only and frequently down — keep it only for crew.
   const [pos, crew] = await Promise.allSettled([
-    fetch("http://api.open-notify.org/iss-now.json").then(r => r.json()),
+    fetch("https://api.wheretheiss.at/v1/satellites/25544").then(r => r.json()),
     fetch("http://api.open-notify.org/astros.json").then(r => r.json()),
   ]);
   return {
-    position: pos.status === "fulfilled" ? {
-      lat: pos.value.iss_position?.latitude,
-      lon: pos.value.iss_position?.longitude,
+    position: pos.status === "fulfilled" && pos.value?.latitude != null ? {
+      lat: pos.value.latitude,
+      lon: pos.value.longitude,
       timestamp: pos.value.timestamp,
     } : null,
     crew: crew.status === "fulfilled"
@@ -370,7 +375,7 @@ function searchLocations(query) {
 async function fetchLaunchChartData(days = 30) {
   const from = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
   const r = await fetch(
-    `${LL2}/launch/?format=json&limit=100&net__gte=${from}&ordering=net&mode=list`,
+    `${LL2}/launch/?format=json&limit=100&net__gte=${from}&ordering=net&mode=normal`,
     { headers: { "User-Agent": "Meridian/1.0" } }
   );
   if (!r.ok) return [];
@@ -393,13 +398,14 @@ async function fetchLaunchChartData(days = 30) {
 // All space data in one shot (for initial globe load)
 spaceRouter.get("/overview", async (req, res) => {
   try {
-    const [launches, upcoming, iss, stats, conflicts, catalog] = await Promise.allSettled([
+    const [launches, upcoming, iss, stats, conflicts, catalog, chartData] = await Promise.allSettled([
       cached("launches", TTL.launches, () => fetchRecentLaunches(20)),
       cached("upcoming", TTL.upcoming, () => fetchUpcomingLaunches(10)),
       cached("iss", TTL.iss, () => fetchISSData()),
       cached("stats", TTL.stats, () => fetchLaunchStats()),
       cached("conflicts", TTL.conflicts, () => fetchConflictZones()),
       cached("catalog", TTL.satellites, () => fetchSatelliteCatalog()),
+      cached("chart", TTL.launches, () => fetchLaunchChartData(30)),
     ]);
     res.json({
       launches:  launches.status  === "fulfilled" ? launches.value  : [],
@@ -408,6 +414,7 @@ spaceRouter.get("/overview", async (req, res) => {
       stats:     stats.status     === "fulfilled" ? stats.value     : {},
       conflicts: conflicts.status === "fulfilled" ? conflicts.value : [],
       catalog:   catalog.status   === "fulfilled" ? catalog.value   : {},
+      chartData: chartData.status === "fulfilled" ? chartData.value : [],
     });
   } catch (e) { res.status(500).json({ error: String(e.message) }); }
 });
