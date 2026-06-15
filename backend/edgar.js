@@ -166,29 +166,78 @@ export async function getRecentFilings(ticker, { forms = ["10-K", "10-Q", "8-K"]
   return out;
 }
 
-// ─── filing text (Business + Risk Factors) ──────────────────────
-// Filings are big HTML. We strip tags and return a bounded slice that
-// covers the narrative the ontology pass needs, without blowing tokens.
-export async function getFilingText(url, maxChars = 45000) {
+// ─── filing text (Business + Risk Factors + MD&A) ────────────────
+// Filings are big HTML, mostly legal boilerplate, exhibit lists and
+// financial-statement tables the ontology pass doesn't need. We strip
+// tags/tables and extract just the three narrative sections that matter:
+// Item 1 (Business), Item 1A (Risk Factors), Item 7 (MD&A).
+const SECTION_DEFS = [
+  { name: "Item 1 — Business", start: /Item\s*1\.?\s*Business\b/gi, end: [/Item\s*1A\.?\s*Risk\s*Factors/i, /Item\s*1B\b/i, /Item\s*2\.?\s*Properties/i], limit: 4500 },
+  { name: "Item 1A — Risk Factors", start: /Item\s*1A\.?\s*Risk\s*Factors\b/gi, end: [/Item\s*1B\b/i, /Item\s*2\.?\s*Properties/i, /Item\s*3\b/i], limit: 6500 },
+  { name: "Item 7 — MD&A", start: /Item\s*7\.?\s*Management.?s\s*Discussion\s*and\s*Analysis/gi, end: [/Item\s*7A\b/i, /Item\s*8\b/i], limit: 5500 },
+];
+
+// Find the LAST match of `re` before the financial-statements tail of the
+// doc — table-of-contents entries appear first, the real section later.
+function lastIndex(text, re) {
+  const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+  let m, last = -1, lastLen = 0;
+  while ((m = g.exec(text))) { last = m.index; lastLen = m[0].length; }
+  return last < 0 ? null : { index: last, length: lastLen };
+}
+
+function cleanSectionText(s) {
+  return s
+    // drop table-of-contents dot leaders ("..........")
+    .replace(/\.{4,}/g, " ")
+    // drop footnote/exhibit-style references ("See Note 12", "Exhibit 10.1")
+    .replace(/\bSee\s+Note\s+\d+[A-Za-z]?\b/gi, " ")
+    .replace(/\bExhibit\s+\d+(\.\d+)?\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export async function getFilingText(url, maxChars = 15000) {
   const r = await secFetch(url);
   const html = await r.text();
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<table[\s\S]*?<\/table>/gi, " ") // financial tables — not useful as prose
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&#\d+;/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  // Prefer the window around "Risk Factors" if we can find it; else head.
-  const rfIdx = text.search(/Item\s*1A[.\s]*Risk Factors/i);
-  if (rfIdx > 0) {
-    const head = text.slice(0, Math.floor(maxChars * 0.45));
-    const risk = text.slice(rfIdx, rfIdx + Math.floor(maxChars * 0.55));
-    return head + " […] " + risk;
+
+  const parts = [];
+  for (const def of SECTION_DEFS) {
+    const start = lastIndex(text, def.start);
+    if (!start) continue;
+    const from = start.index;
+    let end = text.length;
+    for (const endRe of def.end) {
+      const m = text.slice(from + start.length).match(endRe);
+      if (m) {
+        const candidate = from + start.length + m.index;
+        if (candidate > from && candidate < end) end = candidate;
+      }
+    }
+    let section = cleanSectionText(text.slice(from, end));
+    if (section.length > def.limit) section = section.slice(0, def.limit) + " […]";
+    parts.push(`${def.name}:\n${section}`);
   }
-  return text.slice(0, maxChars);
+
+  if (!parts.length) {
+    // Couldn't find the standard items (unusual filing format) — fall
+    // back to a short slice from the head so the pipeline still has text.
+    return cleanSectionText(text.slice(0, Math.min(maxChars, 8000)));
+  }
+
+  let out = parts.join("\n\n");
+  if (out.length > maxChars) out = out.slice(0, maxChars) + " […]";
+  return out;
 }
 
 // Convenience: everything deterministic about a US ticker in one shot.

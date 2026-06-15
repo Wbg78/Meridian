@@ -32,6 +32,8 @@ import { gatherSignalsV2, getCachedSignals } from "./signals.js";
 import { recordSignals, crossReferenceSignals, detectAnomalies } from "./signals-tracker.js";
 
 const MODEL = process.env.RESEARCH_MODEL || "claude-sonnet-4-6";
+const ONTOLOGY_MODEL = process.env.ONTOLOGY_MODEL || "claude-haiku-4-5-20251001";
+const CRISIS_MODEL = process.env.CRISIS_MODEL || "claude-sonnet-4-6";
 const API = "https://api.anthropic.com/v1/messages";
 const ONTO_TTL = 7 * 24 * 3600_000; // a graph older than 7 days rebuilds
 
@@ -76,18 +78,18 @@ const IMPACT_SHAPE = `{
 }`;
 
 // ─── Anthropic call helper ──────────────────────────────────────
-async function callClaude({ system, user, web = false, maxTokens = 4096 }) {
+async function callClaude({ system, user, web = false, maxTokens = 4096, model = MODEL }) {
   // Strip any non-printable-ASCII chars (e.g. a stray U+2028/whitespace from
   // copy-paste) — HTTP headers must be pure ASCII or fetch() throws.
   const key = (process.env.ANTHROPIC_API_KEY || "").replace(/[^\x21-\x7E]/g, "");
   if (!key) throw new Error("ANTHROPIC_API_KEY not set on server");
   const body = {
-    model: MODEL,
+    model,
     max_tokens: maxTokens,
     system,
     messages: [{ role: "user", content: user }],
   };
-  if (web) body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 6 }];
+  if (web) body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }];
 
   const r = await fetch(API, {
     method: "POST",
@@ -96,6 +98,9 @@ async function callClaude({ system, user, web = false, maxTokens = 4096 }) {
   });
   const data = await r.json();
   if (data.error) throw new Error(data.error.message || "anthropic error");
+  if (data.usage) {
+    console.log(`[Claude] ${body.model} — input: ${data.usage.input_tokens} tokens, output: ${data.usage.output_tokens} tokens, est cost: $${((data.usage.input_tokens * 0.003 + data.usage.output_tokens * 0.015) / 1000).toFixed(4)}`);
+  }
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 }
 
@@ -112,7 +117,7 @@ async function buildOntologyPass({ ticker, spine, context }) {
   const facts = spine?.financials
     ? JSON.stringify(spine.financials.concepts) + "\nDerived: " + JSON.stringify(spine.financials.derived)
     : "No EDGAR financials (likely a non-US filer — rely on the profile + your knowledge, and lower confidences).";
-  const filing = spine?.filingText ? spine.filingText.slice(0, 45000) : "No 10-K text available.";
+  const filing = spine?.filingText ? spine.filingText.slice(0, 15000) : "No 10-K text available.";
   const profile = context ? JSON.stringify(context).slice(0, 2000) : "none";
 
   const system =
@@ -130,7 +135,31 @@ async function buildOntologyPass({ ticker, spine, context }) {
     `flag single-source suppliers and customer concentration explicitly; ` +
     `'source' is where you found each claim (e.g. "10-K Item 1", "financials", "profile"). Return JSON only.`;
 
-  return parseJson(await callClaude({ system, user, maxTokens: 8192 }));
+  return parseJson(await callClaude({ system, user, maxTokens: 8192, model: ONTOLOGY_MODEL }));
+}
+
+// ─── Compress the graph to what crisis propagation actually needs ──
+// The full graph (with citations etc.) still goes to saveOntology(); this
+// trimmed copy is what we spend Call 2's input tokens on.
+function compressGraph(graph) {
+  const stripSource = (arr) => (arr || []).map(({ source, ...rest }) => rest);
+  const topByConfidence = (arr, n) =>
+    (arr || []).slice().sort((a, b) => (b.confidence || 0) - (a.confidence || 0)).slice(0, n);
+
+  return {
+    company: graph.company,
+    moat: graph.company?.moat,
+    segments: stripSource((graph.segments || []).filter((s) => (s.confidence || 0) > 0.5)),
+    geographies: stripSource(graph.geographies),
+    customers: stripSource(graph.customers),
+    suppliers: stripSource((graph.suppliers || []).filter((s) => s.criticality !== "standard")),
+    competitors: stripSource(graph.competitors),
+    dependencies: stripSource((graph.dependencies || []).filter((d) => (d.confidence || 0) > 0.4)),
+    riskFactors: stripSource(topByConfidence(graph.riskFactors, 5)),
+    edges: (graph.edges || []).slice(0, 15),
+    positioningSignal: graph.positioningSignal,
+    anomalies: graph.anomalies,
+  };
 }
 
 // ─── PASS 2: crisis propagation (live web) ──────────────────────
@@ -151,7 +180,7 @@ async function propagateCrisis({ ticker, scenario, graph }) {
     `Then synthesise bull/bear, what to watch, and what would falsify the thesis.\n\n` +
     `Fill this exact schema:\n${IMPACT_SHAPE}\n\nReturn JSON only.`;
 
-  return parseJson(await callClaude({ system, user, web: true, maxTokens: 8192 }));
+  return parseJson(await callClaude({ system, user, web: true, maxTokens: 8192, model: CRISIS_MODEL }));
 }
 
 // ─── the agent loop, as an async generator of stage events ──────
@@ -232,7 +261,7 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
 
   // ── STAGE 2: Crisis propagation ────────────────────────────────
   yield { stage: "crisis", status: "running", label: `Injecting shock: "${scenario}" — walking the web` };
-  const impact = await propagateCrisis({ ticker, scenario, graph });
+  const impact = await propagateCrisis({ ticker, scenario, graph: compressGraph(graph) });
   const run = await saveRun({ ticker, scenario, impact }).catch(() => null);
   yield { stage: "crisis", status: "done", label: "Shock propagated", data: impact };
 
