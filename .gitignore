@@ -24,3 +24,7 @@ npm-debug.log*
 # Signal-engine runtime state (Twitter monthly budget tracker)
 backend/.twitter-budget.json
 .twitter-budget.json
+
+# The Eye: satellite imagery cache
+backend/satellite-cache/
+satellite-cache/

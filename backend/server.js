@@ -20,6 +20,9 @@ import { toYahoo, SYMBOL_MAP, toTradingView } from "./symbols.js";
 import { initDb } from "./db.js";
 import { researchRouter } from "./research.js";
 import { resolveOutcomes } from "./signals-tracker.js";
+import { spaceRouter } from "./space.js";
+import { satelliteRouter } from "./satellite.js";
+import { patentsRouter } from "./patents.js";
 
 const app = express();
 app.use(express.json());
@@ -116,6 +119,11 @@ app.post("/api/login", (req, res) => {
 // --- Deep Research engine (owner-only; see research.js) ---
 await initDb();
 app.use("/api/research", requireOwner, researchRouter);
+
+// --- The Eye: space, satellite & patent intelligence (owner-only) ---
+app.use("/api/space",     requireOwner, spaceRouter);
+app.use("/api/satellite", requireOwner, satelliteRouter);
+app.use("/api/patents",   requireOwner, patentsRouter);
 
 // --- Signal-engine learning loop ---
 // Once a day, resolve outcomes for signals that fired 7+ days ago:
