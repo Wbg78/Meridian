@@ -102,7 +102,7 @@ function propagateSat(satrec, date) {
 }
 
 // ─── CesiumJS Globe ──────────────────────────────────────────────
-function Globe({ data, satellites, gpsjamZones, showGpsjam, onFacilityClick, onSatClick, onZoneClick, onReady }) {
+function Globe({ data, satellites, viewerReady, gpsjamZones, showGpsjam, onFacilityClick, onSatClick, onZoneClick, onReady }) {
   const ref           = useRef(null);
   const viewerRef     = useRef(null);
   const dataEntsRef   = useRef([]);
@@ -249,10 +249,11 @@ function Globe({ data, satellites, gpsjamZones, showGpsjam, onFacilityClick, onS
   }, [gpsjamZones, showGpsjam]);
 
   // ── Live satellites (SGP4) ─────────────────────────────────────
-  // NOTE: this effect runs when `satellites` changes AND when the viewer
-  // becomes ready (parent bumps `satKey` via `viewerReady`). The key is
-  // passed as the `key` prop on Globe to force remount if needed, but
-  // we handle it here directly by watching the satellites array.
+  // Depends on BOTH `satellites` and `viewerReady` (passed as prop).
+  // If satellites arrive before the viewer is ready, this effect exits
+  // early; once the parent sets viewerReady=true (via onReady callback)
+  // Globe re-renders with the new prop and this effect re-runs — no
+  // remount needed, no infinite loop.
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer || viewer.isDestroyed() || !window.satellite || !satellites?.length) return;
@@ -297,7 +298,7 @@ function Globe({ data, satellites, gpsjamZones, showGpsjam, onFacilityClick, onS
       if (v && !v.isDestroyed()) recs.forEach(({ ent }) => v.entities.remove(ent));
       satEntsRef.current = [];
     };
-  }, [satellites]);
+  }, [satellites, viewerReady]); // viewerReady prop triggers re-run once viewer is up
 
   // Facility markers + flyTo
   const searchEntsRef = useRef([]);
@@ -829,12 +830,12 @@ export default function TheEye({ token }) {
       .then(r => r.json()).then(d => setGpsjamZones(Array.isArray(d) ? d : [])).catch(() => {});
   }, [token]);
 
-  // Fix #2 — after viewer signals ready, bump satellite key so the Globe
-  // satellite effect re-runs even if satellites were already loaded
-  const [satKey, setSatKey] = useState(0);
+  // Fix #2 — once the viewer signals ready, viewerReady flips to true.
+  // Globe receives it as a prop and uses it as a useEffect dependency,
+  // so the satellite rendering re-runs even if TLEs arrived first.
+  // (The old key={satKey} approach caused an infinite remount loop.)
   const handleViewerReady = useCallback(() => {
     setViewerReady(true);
-    setSatKey(k => k + 1);
   }, []);
 
   function handleSearchResult(result) {
@@ -987,17 +988,17 @@ export default function TheEye({ token }) {
 
         {/* ── Globe (center) ── */}
         <div style={{ flex: 1, position: "relative" }}>
-          {/* Fix #2: key=satKey forces Globe to re-mount satellites after viewerReady */}
+          {/* Fix #2: viewerReady prop → satellite useEffect re-runs once viewer is up */}
           <Globe
-            key={`globe-${satKey}`}
             data={data}
             satellites={satellites}
+            viewerReady={viewerReady}
             gpsjamZones={gpsjamZones}
             showGpsjam={activePanel === "sats"}
             onFacilityClick={controls => { globeControlsRef.current = controls; }}
             onSatClick={setSelectedSat}
-            onZoneClick={setActiveZone}   // Fix #4
-            onReady={handleViewerReady}   // Fix #2
+            onZoneClick={setActiveZone}
+            onReady={handleViewerReady}
           />
 
           {satellites.length > 0 && (
