@@ -192,8 +192,14 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
   yield { stage: "signals", status: "running", label: "Gathering institutional positioning signals" };
   let positioningSignal = null;
   let anomalies = [];
+
+  // If we have a cached graph already, pass its sector so signals.js can
+  // apply sector-specific credibility and ownership-tilt corrections.
+  const cachedGraph = !force ? await getOntology(ticker).catch(() => null) : null;
+  const cachedSector = cachedGraph?.graph?.company?.sector || null;
+
   try {
-    positioningSignal = await gatherSignalsV2(ticker);
+    positioningSignal = await gatherSignalsV2(ticker, cachedSector);
 
     // Record signals for learning (background, non-blocking)
     recordSignals(ticker, positioningSignal.scoredSignals || [], null)
@@ -221,7 +227,7 @@ async function* runDeepResearch({ ticker, scenario, context, force = false }) {
   // ── STAGE 1: Ontology (cached or fresh) ────────────────────────
   let graph = null;
   if (!force) {
-    const row = await getOntology(ticker).catch(() => null);
+    const row = cachedGraph;  // reuse the lookup already done above for sector
     if (row && Date.now() - new Date(row.built_at).getTime() < ONTO_TTL) {
       graph = row.graph;
       yield { stage: "edgar", status: "cached", label: `Reusing entity graph from ${new Date(row.built_at).toLocaleDateString("sv-SE")}` };

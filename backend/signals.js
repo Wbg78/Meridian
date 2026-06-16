@@ -137,6 +137,122 @@ const SOURCE_CREDIBILITY = {
   unknown:          0.25,
 };
 
+// ─── OWNERSHIP / FINANCIER BIAS ──────────────────────────────────
+// Who owns or commercially benefits from each outlet. This is distinct
+// from political lean — it captures systematic skew from financial
+// interests: a data-sales company (Bloomberg) will frame market
+// volatility differently from a loss-leader news division.
+//
+// commercialBias: +1 = systematically pro-market/corporate, -1 = anti
+// antiRegulatory: +1 = consistently frames regulation as bad for business
+// sectorBias: specific sectors where ownership creates a detectable tilt
+const OWNERSHIP_BIAS = {
+  bloomberg: {
+    owner: "Michael Bloomberg / Bloomberg LP",
+    ownerType: "billionaire_financial",
+    commercialBias:  0.15,  // Bloomberg LP sells financial data — stable markets = good business
+    antiRegulatory:  0.10,
+    sectorBias: { financials: 0.15, technology: 0.05, energy: 0.00 },
+  },
+  wsj: {
+    owner: "News Corp / Rupert Murdoch",
+    ownerType: "media_conglomerate",
+    commercialBias:  0.20,  // News Corp has broad corporate interests
+    antiRegulatory:  0.25,
+    sectorBias: { financials: 0.10, energy: 0.15, technology: -0.05 },
+  },
+  financial_times: {
+    owner: "Nikkei Inc.",
+    ownerType: "japanese_financial_group",
+    commercialBias:  0.10,  // Nikkei has Asia-Pacific financial interests
+    antiRegulatory:  0.05,
+    sectorBias: { financials: 0.10, industrials: 0.08, technology: 0.05 },
+  },
+  cnbc: {
+    owner: "Comcast / NBCUniversal",
+    ownerType: "media_telecom_conglomerate",
+    commercialBias:  0.20,  // CNBC revenue depends on ad spend from financial firms
+    antiRegulatory:  0.10,
+    sectorBias: { financials: 0.10, technology: 0.08, telecommunications: 0.12 },
+  },
+  fox_business: {
+    owner: "Fox Corporation / Murdoch",
+    ownerType: "media_conglomerate",
+    commercialBias:  0.30,
+    antiRegulatory:  0.40,
+    sectorBias: { energy: 0.20, financials: 0.10, defense: 0.15 },
+  },
+  reuters: {
+    owner: "Thomson Reuters Corporation",
+    ownerType: "financial_data_company",
+    commercialBias:  0.05,  // Reuters also sells financial terminals — very mild tilt
+    antiRegulatory:  0.00,
+    sectorBias: {},         // Reuters is genuinely sector-neutral
+  },
+  guardian: {
+    owner: "Scott Trust (non-profit)",
+    ownerType: "nonprofit_trust",
+    commercialBias: -0.15,  // Endowment model = less ad pressure, more critical
+    antiRegulatory: -0.20,
+    sectorBias: { energy: -0.15, financials: -0.10 },
+  },
+  nyt: {
+    owner: "New York Times Company / Sulzberger family",
+    ownerType: "family_media",
+    commercialBias: -0.05,
+    antiRegulatory: -0.10,
+    sectorBias: { technology: -0.05, energy: -0.08 },
+  },
+  barrons: {
+    owner: "News Corp / Murdoch (separate from WSJ)",
+    ownerType: "media_conglomerate",
+    commercialBias:  0.15,  // investor-focused — pro-market by design
+    antiRegulatory:  0.15,
+    sectorBias: { financials: 0.10, technology: 0.05 },
+  },
+  seeking_alpha: {
+    owner: "Seeking Alpha Inc. (private)",
+    ownerType: "fintech_platform",
+    commercialBias:  0.10,  // ad revenue from financial firms + premium subs
+    antiRegulatory:  0.05,
+    sectorBias: { technology: 0.08, healthcare: 0.05 },
+  },
+};
+
+// ─── SECTOR-SPECIFIC CREDIBILITY EXPERTISE ───────────────────────
+// Outlets vary significantly in how well they cover specific sectors.
+// FT on European financials = very reliable. CNBC on early-stage biotech
+// = much weaker. These are additive deltas on top of base credibility.
+// Only non-zero deltas listed (saves space; default = 0.0 adjustment).
+const SECTOR_EXPERTISE = {
+  reuters:         { energy: +0.03, financials: +0.02, healthcare: +0.01, industrials: +0.02 },
+  bloomberg:       { financials: +0.05, technology: +0.02, real_estate: +0.03, energy: +0.02 },
+  financial_times: { financials: +0.05, industrials: +0.03, real_estate: +0.02, technology: -0.02 },
+  wsj:             { financials: +0.03, energy: +0.02, industrials: +0.02 },
+  barrons:         { financials: +0.05, technology: +0.03, healthcare: +0.02 },
+  seeking_alpha:   { technology: +0.06, healthcare: +0.04, consumer: +0.02, financials: -0.03 },
+  cnbc:            { technology: +0.04, financials: +0.02, consumer: +0.02, healthcare: -0.03 },
+  marketwatch:     { financials: +0.02, consumer: +0.01 },
+  finnhub:         { technology: +0.03, healthcare: +0.02, financials: +0.03 },
+  reddit_wsb:      { technology: +0.05, financials: -0.12, healthcare: -0.05 }, // early on meme-tech, terrible on macro
+  reddit_investing: { technology: +0.02, financials: -0.04 },
+};
+
+// Normalise the sector string the ontology produces into our lookup keys.
+function normalizeSector(sector) {
+  if (!sector) return null;
+  const s = sector.toLowerCase();
+  if (/tech|software|semi|chip|ai\b|cloud/.test(s))                return "technology";
+  if (/health|pharma|biotech|medic|life sci/.test(s))              return "healthcare";
+  if (/energ|oil|gas|petro|renewable/.test(s))                     return "energy";
+  if (/financ|bank|insur|asset manag|invest/.test(s))              return "financials";
+  if (/industri|manufactur|aerospace|logistic|transport/.test(s))  return "industrials";
+  if (/consumer|retail|restaurant|hospitali/.test(s))              return "consumer";
+  if (/real estate|reit/.test(s))                                   return "real_estate";
+  if (/defense|military|government/.test(s))                       return "defense";
+  return "general";
+}
+
 // ─── POLITICAL BIAS CORRECTION ───────────────────────────────────
 // Financial news outlets have political lean that affects HOW they
 // frame corporate/regulatory/macro news. This doesn't mean they're
@@ -195,6 +311,29 @@ function applyBiasCorrection(sentimentScore, sourceKey, storyType) {
   // Apply: if source has strong lean, dampen the sentiment in that direction
   const corrected = sentimentScore - (sentimentScore * Math.abs(correction) * Math.sign(biasMagnitude));
   return Math.max(-1, Math.min(1, corrected));
+}
+
+// Apply ownership / financier bias as a second correction pass.
+// max shift = 10% (correctionFactor 0.10) so it adds to political bias
+// but never dominates — political lean is usually the stronger signal.
+function applyOwnershipBias(sentimentScore, sourceKey, normalizedSector) {
+  const ob = OWNERSHIP_BIAS[sourceKey];
+  if (!ob) return sentimentScore;
+  const sectorAdj = normalizedSector ? (ob.sectorBias?.[normalizedSector] || 0) : 0;
+  const totalBias = ob.commercialBias + sectorAdj;
+  const correctionFactor = 0.10;
+  const corrected = sentimentScore - (sentimentScore * Math.abs(totalBias * correctionFactor) * Math.sign(totalBias));
+  return Math.max(-1, Math.min(1, corrected));
+}
+
+// Look up sector-expertise delta and add it to base credibility.
+// Returns the adjusted credibility clamped to [0.05, 1.0].
+function getSectorCredibility(baseCredibility, sourceKey, normalizedSector) {
+  if (!normalizedSector) return baseCredibility;
+  const expertise = SECTOR_EXPERTISE[sourceKey];
+  if (!expertise) return baseCredibility;
+  const delta = expertise[normalizedSector] ?? 0;
+  return Math.max(0.05, Math.min(1.0, baseCredibility + delta));
 }
 
 // ─── TEMPORAL DECAY ─────────────────────────────────────────────
@@ -267,35 +406,77 @@ function applyCorroborationMultiplier(signals) {
 }
 
 // ─── COMPUTE FINAL SIGNAL SCORE ─────────────────────────────────
-function computeSignalScore(raw) {
+// sector: normalised sector string from the ontology (optional).
+// When present, enables sector-specific credibility and ownership
+// sector-tilt corrections.
+function computeSignalScore(raw, sector = null) {
   const sourceKey = resolveSourceKey(raw.source);
-  const credibility = SOURCE_CREDIBILITY[sourceKey] || SOURCE_CREDIBILITY.unknown;
+  const normalizedSector = sector ? normalizeSector(sector) : (raw.sector ? normalizeSector(raw.sector) : null);
+
+  // Base credibility adjusted for sector expertise (e.g. FT on financials → +0.05)
+  const baseCredibility = SOURCE_CREDIBILITY[sourceKey] || SOURCE_CREDIBILITY.unknown;
+  const credibility = getSectorCredibility(baseCredibility, sourceKey, normalizedSector);
+
   const storyType = detectStoryType(raw.text || raw.headline || "");
   const rawSentiment = raw.sentiment ?? (raw.direction === "bullish" ? 0.7 : raw.direction === "bearish" ? -0.7 : 0);
-  const correctedSentiment = applyBiasCorrection(rawSentiment, sourceKey, storyType);
+
+  // Pass 1 — political lean correction
+  const politicallyCorrected = applyBiasCorrection(rawSentiment, sourceKey, storyType);
+  // Pass 2 — ownership / financier interest correction
+  const correctedSentiment = applyOwnershipBias(politicallyCorrected, sourceKey, normalizedSector);
+
   const temporal = temporalWeight(raw.publishedAt || raw.datetime);
   const engagement = engagementWeight(raw.engagement || raw.upvotes || raw.likes || 0);
 
   // Final score = sentiment × credibility × temporal × engagement
   const score = correctedSentiment * credibility * temporal * engagement;
 
+  // Granular signal type for Beta tracking (goes into sourceKey logged to tracker)
+  const signalType = resolveSignalType(raw.cluster, correctedSentiment);
+
   return {
     source: raw.source || "unknown",
     sourceKey,
+    signalType,           // e.g. "finnhub_price_target_raise" for granular Beta posteriors
     headline: raw.headline || raw.title || raw.text?.slice(0, 120) || "",
     url: raw.url || null,
     rawSentiment: +rawSentiment.toFixed(3),
     correctedSentiment: +correctedSentiment.toFixed(3),
     biasApplied: +(rawSentiment - correctedSentiment).toFixed(3),
+    ownershipBiasApplied: +(politicallyCorrected - correctedSentiment).toFixed(3),
     storyType,
     credibility,
+    sectorAdjusted: credibility !== baseCredibility,
     temporalWeight: +temporal.toFixed(2),
     engagementWeight: +engagement.toFixed(2),
     finalScore: +score.toFixed(4),
     direction: correctedSentiment > 0.15 ? "bullish" : correctedSentiment < -0.15 ? "bearish" : "neutral",
     publishedAt: raw.publishedAt || raw.datetime || null,
     cluster: raw.cluster || "general",
+    sector: normalizedSector,
   };
+}
+
+// Resolve a granular signal type key for Beta tracking.
+// Allows the tracker to learn separately: "finnhub price target raise"
+// vs "finnhub analyst downgrade" — they have different accuracy rates.
+function resolveSignalType(cluster, sentiment) {
+  if (cluster === "analystMoves") {
+    return sentiment > 0 ? "analyst_upgrade" : "analyst_downgrade";
+  }
+  if (cluster === "insiderActivity") {
+    return sentiment > 0 ? "insider_buy" : "insider_sell";
+  }
+  if (cluster === "institutionPositionChange") {
+    return sentiment > 0 ? "institution_buy" : "institution_sell";
+  }
+  if (cluster === "aggressiveMoves") {
+    return sentiment > 0 ? "options_bullish" : "options_bearish";
+  }
+  if (cluster === "capitalFlow") {
+    return sentiment > 0 ? "capital_inflow" : "capital_outflow";
+  }
+  return sentiment > 0 ? "news_positive" : sentiment < 0 ? "news_negative" : "news_neutral";
 }
 
 // ─── SOURCE 1: SEC EDGAR Form 4 (insider transactions) ──────────
@@ -699,7 +880,9 @@ async function applyLearnedCredibility(scored) {
 
 // Override the main gatherSignals export to include Twitter + learning.
 // This replaces the original export at the bottom of this file.
-export async function gatherSignalsV2(ticker) {
+// sector: optional — the company's sector string from a cached ontology graph.
+// When provided, enables sector-specific credibility and ownership-tilt corrections.
+export async function gatherSignalsV2(ticker, sector = null) {
   ticker = ticker.toUpperCase().trim();
 
   // 1) Fetch all sources in parallel (keyless Google News + institutional 13F + Twitter)
@@ -724,8 +907,8 @@ export async function gatherSignalsV2(ticker) {
     }
   });
 
-  // 3) Score every signal
-  let scored = allRaw.map(computeSignalScore).filter(s => s.finalScore !== 0);
+  // 3) Score every signal (pass sector so corrections are sector-aware)
+  let scored = allRaw.map(s => computeSignalScore(s, sector)).filter(s => s.finalScore !== 0);
 
   // 4) Apply learned credibility adjustments (the "learn over time" part)
   scored = await applyLearnedCredibility(scored);
@@ -780,6 +963,13 @@ export async function gatherSignalsV2(ticker) {
     politicalBiasNote: avgBiasApplied > 0.05
       ? `Avg political bias correction: ${(avgBiasApplied * 100).toFixed(1)}% sentiment shift`
       : "Minimal political bias detected",
+    ownershipBiasNote: (() => {
+      const avgOwnership = scored.reduce((s, x) => s + Math.abs(x.ownershipBiasApplied || 0), 0) / Math.max(scored.length, 1);
+      return avgOwnership > 0.01
+        ? `Avg ownership/financier bias correction: ${(avgOwnership * 100).toFixed(1)}% sentiment shift`
+        : "Minimal ownership bias detected";
+    })(),
+    sectorUsed: sector ? normalizeSector(sector) : null,
     learningNote: learnedSignals.length > 0
       ? `${learnedSignals.length} signals adjusted by learned credibility from historical accuracy`
       : "Not enough history yet to apply learned adjustments (need 10+ signals per source)",
