@@ -55,6 +55,8 @@ export const INFORMED_PRIORS = {
   reddit_wsb:         { alpha: 2, beta: 5 },   // contrarian/meme — often wrong direction
   twitter_unknown:    { alpha: 2, beta: 5 },
   unknown:            { alpha: 2, beta: 4 },   // conservative prior for unknowns
+  substack_curated:   { alpha: 5, beta: 3 },   // independent authors with strong track records
+  substack_unknown:   { alpha: 3, beta: 4 },   // unknown Substack writers
   _default:           { alpha: 3, beta: 3 },   // flat-ish prior for anything unlisted
 };
 

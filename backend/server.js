@@ -23,6 +23,9 @@ import { resolveOutcomes } from "./signals-tracker.js";
 import { spaceRouter } from "./space.js";
 import { satelliteRouter } from "./satellite.js";
 import { patentsRouter } from "./patents.js";
+import { getWatchlist, addToWatchlist, removeFromWatchlist } from "./watchlist.js";
+import { runMotor } from "./motor.js";
+import { getQuantMetrics } from "./quant.js";
 
 const app = express();
 app.use(express.json());
@@ -125,6 +128,41 @@ app.use("/api/space",     requireOwner, spaceRouter);
 app.use("/api/satellite", requireOwner, satelliteRouter);
 app.use("/api/patents",   requireOwner, patentsRouter);
 
+// --- Watchlist API (owner-only) ---
+// The Haiku motor reads this list nightly.
+app.get("/api/watchlist", requireOwner, async (req, res) => {
+  try { res.json(await getWatchlist()); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post("/api/watchlist", requireOwner, async (req, res) => {
+  const ticker = (req.body?.ticker || "").toUpperCase().trim();
+  if (!ticker) return res.status(400).json({ error: "ticker required" });
+  await addToWatchlist(ticker);
+  res.json({ ok: true, ticker });
+});
+
+app.delete("/api/watchlist/:ticker", requireOwner, async (req, res) => {
+  await removeFromWatchlist(req.params.ticker);
+  res.json({ ok: true });
+});
+
+// Manual motor trigger (owner-only, useful for testing without Render cron)
+app.post("/api/motor/run", requireOwner, async (req, res) => {
+  res.json({ ok: true, message: "Motor started in background" });
+  runMotor().catch(e => console.error("[Motor] Error:", e.message));
+});
+
+// --- Quant metrics endpoint ---
+app.get("/api/research/quant/:ticker", requireOwner, async (req, res) => {
+  try {
+    const data = await getQuantMetrics(req.params.ticker);
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ error: String(e) });
+  }
+});
+
 // --- Signal-engine learning loop ---
 // Once a day, resolve outcomes for signals that fired 7+ days ago:
 // did the stock actually move in the predicted direction? This is how
@@ -139,6 +177,28 @@ setInterval(async () => {
   const result = await resolveOutcomes(priceForOutcome).catch(() => null);
   if (result?.resolved > 0) console.log(`Signal outcomes resolved: ${result.resolved}`);
 }, 86400_000);
+
+// --- Haiku motor nightly cron (runs at 2am UTC every day) ---
+// The motor fills the Beta tracker with cheap Haiku classifications so
+// the system accumulates data without expensive Sonnet runs.
+{
+  const MOTOR_HOUR_UTC = 2; // 2am UTC
+  function msUntilNextMotorRun() {
+    const now = new Date();
+    const next = new Date(now);
+    next.setUTCHours(MOTOR_HOUR_UTC, 0, 0, 0);
+    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+    return next.getTime() - now.getTime();
+  }
+  // Fire once now after the first interval, then every 24h
+  setTimeout(async () => {
+    await runMotor().catch(e => console.error("[Motor] Error:", e.message));
+    setInterval(async () => {
+      await runMotor().catch(e => console.error("[Motor] Error:", e.message));
+    }, 86400_000);
+  }, msUntilNextMotorRun());
+  console.log(`[Motor] Scheduled for ${new Date(Date.now() + msUntilNextMotorRun()).toUTCString()}`);
+}
 
 
 // Your real holdings (shares + avg cost). Prices are fetched live.

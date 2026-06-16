@@ -17,6 +17,7 @@
 // ───────────────────────────────────────────────────────────────
 
 import { TRACKER_SCHEMA, setPool } from "./signals-tracker.js";
+import { WATCHLIST_SCHEMA, setWatchlistPool } from "./watchlist.js";
 
 const HAS_DB = !!process.env.DATABASE_URL;
 let pool = null;
@@ -41,7 +42,8 @@ export async function initDb() {
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
     });
-    setPool(pool); // share the pool with the signal-engine tracker
+    setPool(pool);          // share the pool with the signal-engine tracker
+    setWatchlistPool(pool); // share the pool with the watchlist store
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ontologies (
         ticker     text PRIMARY KEY,
@@ -66,7 +68,8 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS runs_ticker_idx ON runs (ticker, created_at DESC);
     `);
-    await pool.query(TRACKER_SCHEMA); // signal_history, source_accuracy, anomaly_log
+    await pool.query(TRACKER_SCHEMA);  // signal_history, source_accuracy, anomaly_log
+    await pool.query(WATCHLIST_SCHEMA); // watchlist
     console.log("✅ Research DB ready (Postgres).");
   } catch (e) {
     pool = null;

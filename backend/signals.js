@@ -133,6 +133,11 @@ const SOURCE_CREDIBILITY = {
   twitter_fintwit:  0.40,  // known accounts tracked separately
   twitter_unknown:  0.10,
 
+  // Substack — independent newsletter authors
+  // Curated tier = known quality financial authors; unknown = random Substack
+  substack_curated: 0.65,
+  substack_unknown: 0.40,
+
   // Default for unknown sources
   unknown:          0.25,
 };
@@ -380,6 +385,7 @@ function resolveSourceKey(sourceName = "") {
   if (s.includes("yahoo"))      return "yahoo_finance";
   if (s.includes("reddit"))     return "reddit_investing";
   if (s.includes("finnhub"))    return "finnhub";
+  if (s.includes("substack"))   return "substack_curated";
   return "unknown";
 }
 
@@ -834,6 +840,131 @@ export async function getCachedSignals(ticker) {
   return data;
 }
 
+// ─── SOURCE 6: SUBSTACK ──────────────────────────────────────────
+// Two layers:
+//   A. Curated finance/tech Substack RSS feeds — checked for mentions
+//      of the ticker. These are known high-quality independent authors.
+//   B. Google News filtered to substack.com — catches ticker-specific
+//      posts from any Substack author (broader, lower credibility floor).
+//
+// Substack RSS format: https://{slug}.substack.com/feed
+// We re-use parseGoogleNewsRss() since Substack feeds are RSS 2.0.
+
+const CURATED_SUBSTACKS = [
+  { slug: "doomberg",         name: "Doomberg",           tier: "curated" },
+  { slug: "thediff",          name: "The Diff",           tier: "curated" },
+  { slug: "kylascanlon",      name: "Kyla Scanlon",       tier: "curated" },
+  { slug: "notboring",        name: "Not Boring",         tier: "curated" },
+  { slug: "apricitas",        name: "Apricitas Economics", tier: "curated" },
+  { slug: "bigtechnology",    name: "Big Technology",     tier: "curated" },
+  { slug: "thegeneralist",    name: "The Generalist",     tier: "curated" },
+  { slug: "chartr",           name: "Chartr",             tier: "curated" },
+  { slug: "investingcity",    name: "Investing City",     tier: "curated" },
+  { slug: "noahpinion",       name: "Noahpinion",         tier: "curated" },
+  { slug: "byrnehobart",      name: "Byrne Hobart",       tier: "curated" },
+  { slug: "turnernovak",      name: "Turner Novak (Banana Capital)", tier: "curated" },
+  { slug: "legacyresearch",   name: "Legacy Research",    tier: "curated" },
+  { slug: "compoundingquality", name: "Compounding Quality", tier: "curated" },
+  { slug: "contrarianthinking", name: "Contrarian Thinking", tier: "curated" },
+];
+
+const SUBSTACK_SIGNAL_TTL = 4 * 3600_000; // 4h cache per ticker
+const _substackCache = new Map();
+
+async function fetchCuratedSubstackRss(ticker) {
+  const tickerUpper = ticker.toUpperCase();
+  const tickerLower = ticker.toLowerCase();
+  const results = [];
+
+  // Only check curated feeds when we might plausibly find mentions —
+  // fetch all in parallel, check each post title/subtitle for the ticker.
+  const feeds = await Promise.allSettled(
+    CURATED_SUBSTACKS.map(async (sub) => {
+      try {
+        const r = await fetch(
+          `https://${sub.slug}.substack.com/feed`,
+          { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(5000) }
+        );
+        if (!r.ok) return [];
+        const xml = await r.text();
+        const items = parseGoogleNewsRss(xml);
+        const now = Date.now();
+        return items
+          .filter(n => {
+            const age = now - new Date(n.pubDate).getTime();
+            if (age > 7 * 86400_000) return false; // 7 days max
+            const text = (n.title + " " + (n.description || "")).toUpperCase();
+            return text.includes(tickerUpper) || text.includes(tickerLower.toUpperCase());
+          })
+          .slice(0, 3)
+          .map(n => ({
+            source: `Substack · ${sub.name}`,
+            headline: n.title,
+            url: n.link,
+            text: n.title + " " + (n.description || ""),
+            sentiment: null,
+            publishedAt: n.pubDate,
+            engagement: 0,
+            cluster: classifyHeadline(n.title + " " + (n.description || "")),
+            substackAuthor: sub.name,
+          }));
+      } catch { return []; }
+    })
+  );
+
+  for (const r of feeds) {
+    if (r.status === "fulfilled") results.push(...r.value);
+  }
+  return results;
+}
+
+async function fetchSubstackSearchSignals(ticker) {
+  // Google News filtered to substack.com — reliable, keyless
+  try {
+    const query = `${ticker} site:substack.com`;
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query + " when:14d")}&hl=en-US&gl=US&ceid=US:en`;
+    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!r.ok) return [];
+    const xml = await r.text();
+    const now = Date.now();
+    return parseGoogleNewsRss(xml)
+      .filter(n => { const t = new Date(n.pubDate).getTime(); return t && (now - t) < 14 * 86400_000; })
+      .slice(0, 15)
+      .map(n => ({
+        source: n.source?.includes("Substack") ? `Substack · ${n.source}` : (n.source || "Substack"),
+        headline: n.title,
+        url: n.link,
+        text: n.title + " " + (n.description || ""),
+        sentiment: null,
+        publishedAt: n.pubDate,
+        engagement: 0,
+        cluster: classifyHeadline(n.title + " " + (n.description || "")),
+      }));
+  } catch { return []; }
+}
+
+async function fetchSubstackSignals(ticker) {
+  const cached = _substackCache.get(ticker);
+  if (cached && Date.now() - cached.at < SUBSTACK_SIGNAL_TTL) return cached.data;
+
+  const [curated, searched] = await Promise.all([
+    fetchCuratedSubstackRss(ticker),
+    fetchSubstackSearchSignals(ticker),
+  ]);
+
+  // Deduplicate by headline
+  const seen = new Set();
+  const combined = [...curated, ...searched].filter(n => {
+    const k = n.headline.toLowerCase().slice(0, 60);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  _substackCache.set(ticker, { at: Date.now(), data: combined });
+  return combined;
+}
+
 // ─── TWITTER INTEGRATION ─────────────────────────────────────────
 // Import is dynamic so the file still works if twitter.js is absent.
 async function fetchTwitterSignalsSafe(ticker, clusters) {
@@ -886,7 +1017,7 @@ export async function gatherSignalsV2(ticker, sector = null) {
   ticker = ticker.toUpperCase().trim();
 
   // 1) Fetch all sources in parallel (keyless Google News + institutional 13F + Twitter)
-  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw, googleNewsRaw, instData] = await Promise.all([
+  const [insiderRaw, newsRaw, redditRaw, analystRaw, twitterRaw, googleNewsRaw, instData, substackRaw] = await Promise.all([
     fetchInsiderTransactions(ticker),
     fetchNewsSignals(ticker, KEYWORD_CLUSTERS),
     fetchRedditSignals(ticker),
@@ -894,10 +1025,11 @@ export async function gatherSignalsV2(ticker, sector = null) {
     fetchTwitterSignalsSafe(ticker, KEYWORD_CLUSTERS),
     fetchGoogleNewsSignals(ticker),
     fetchInstitutionsSafe(ticker),
+    fetchSubstackSignals(ticker),
   ]);
   const institutionalRaw = instData?.signals || [];
 
-  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw, ...googleNewsRaw, ...institutionalRaw];
+  const allRaw = [...insiderRaw, ...newsRaw, ...redditRaw, ...analystRaw, ...twitterRaw, ...googleNewsRaw, ...institutionalRaw, ...substackRaw];
   if (allRaw.length === 0) return buildEmptySignal(ticker);
 
   // 2) Infer missing sentiment
@@ -945,6 +1077,7 @@ export async function gatherSignalsV2(ticker, sector = null) {
       reddit: redditRaw.length,
       analyst: analystRaw.length,
       twitter: twitterRaw.length,
+      substack: substackRaw.length,
     },
     institutionalPositioning: instData?.positioning || null,
     bullSignals: bullSignals.length,
