@@ -283,3 +283,50 @@ patentsRouter.get("/landscape", async (req, res) => {
   try { res.json(await fetchIndustryLandscape(tech)); }
   catch (e) { res.status(500).json({ error: String(e.message) }); }
 });
+
+// ─── BOSS WILLIAM — Part explanation (per-click, cached) ─────────
+// POST /api/patents/explain-part
+// body: { patentNumber, component, function, cadHint, coreInnovation, title }
+// Returns { explanation } — 2-4 friendly sentences from Haiku.
+// Cached per (patentNumber :: component) so repeat clicks are free.
+const PART_EXPLAIN_CACHE = new Map();
+
+patentsRouter.post("/explain-part", async (req, res) => {
+  const { patentNumber, component, function: fn, cadHint, coreInnovation, title } = req.body || {};
+  if (!component) return res.status(400).json({ error: "component required" });
+  const key = `${patentNumber}::${component}`;
+  const hit = PART_EXPLAIN_CACHE.get(key);
+  if (hit) return res.json({ explanation: hit, cached: true });
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.json({
+      explanation: `${component}: ${fn || "part of the assembly"}. (AI explanation unavailable — ANTHROPIC_API_KEY not set in backend environment.)`,
+    });
+  }
+  try {
+    const prompt = `You are "Boss William", a friendly, encouraging engineering mentor.
+A user clicked the part "${component}" in a 3D schematic model of the patent "${title || patentNumber}".
+The patent's core innovation: ${coreInnovation || "n/a"}.
+This part's function: ${fn || "n/a"}. Modeling hint: ${cadHint || "n/a"}.
+Explain in 2-4 warm, plain-language sentences what this specific part does and why it matters to the product. Avoid jargon; if you must use a technical term, gloss it briefly.`;
+
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 400,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = await r.json();
+    const explanation = (data.content || [])
+      .filter(b => b.type === "text").map(b => b.text).join("").trim();
+    PART_EXPLAIN_CACHE.set(key, explanation);
+    res.json({ explanation });
+  } catch (e) { res.status(500).json({ error: String(e.message) }); }
+});

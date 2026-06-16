@@ -441,22 +441,23 @@ function IntelFeed({ launches }) {
 function FacilitiesPanel({ token, globeControlsRef }) {
   const [facilities, setFacilities] = useState([]);
   const [selected, setSelected]     = useState(null);
+  const [selFacility, setSelFacility] = useState(null); // store the selected facility object
   const [analysis, setAnalysis]     = useState(null);
   const [loading, setLoading]       = useState(false);
 
   useEffect(() => {
     fetch(`${BACKEND}/api/satellite/facilities`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json()).then(d => setFacilities(Array.isArray(d) ? d : [])).catch(() => {});
+      .then(r => r.json()).then(d => setFacilities(Array.isArray(d) ? d : []))
+      .catch(() => {});
   }, [token]);
 
   async function analyze(f) {
-    setSelected(f.key); setLoading(true); setAnalysis(null);
+    setSelected(f.key); setSelFacility(f); setLoading(true); setAnalysis(null);
     if (globeControlsRef.current) {
       const { addFacilityMarkers, flyTo } = globeControlsRef.current;
       addFacilityMarkers([{ name: f.name, lat: f.lat, lon: f.lon }]);
       flyTo(f.lat, f.lon, 600000);
     }
-    // Fix #3 — use Haiku + Google News endpoint instead of satellite imagery
     const r = await fetch(`${BACKEND}/api/satellite/ops-news/${f.key}`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(r => r.json()).catch(e => ({ error: e.message }));
@@ -467,6 +468,9 @@ function FacilitiesPanel({ token, globeControlsRef }) {
 
   return (
     <div>
+      <div style={{ fontSize: 9, color: T.muted, marginBottom: 8 }}>
+        Click a facility to fly the globe there and pull live news intelligence.
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 12 }}>
         {facilities.map(f => (
           <button key={f.key} onClick={() => analyze(f)} style={{
@@ -476,9 +480,12 @@ function FacilitiesPanel({ token, globeControlsRef }) {
             fontFamily: T.mono, fontSize: 9, fontWeight: 700,
             padding: "6px 8px", borderRadius: 2, cursor: "pointer", textAlign: "left",
           }}>
-            {f.company}<br /><span style={{ color: T.muted, fontWeight: 400 }}>{f.region}</span>
+            {f.company}<br /><span style={{ color: T.muted, fontWeight: 400, fontSize: 8 }}>{f.region}</span>
           </button>
         ))}
+        {facilities.length === 0 && (
+          <div style={{ gridColumn: "1/-1", color: T.muted, fontSize: 10 }}>Loading facilities…</div>
+        )}
       </div>
 
       {loading && (
@@ -487,14 +494,34 @@ function FacilitiesPanel({ token, globeControlsRef }) {
         </div>
       )}
 
-      {analysis && !loading && !analysis.error && (
+      {/* Always show something when analysis is done, even on error */}
+      {analysis && !loading && (
         <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
-          <div style={{ color: T.cyan, fontSize: 11, fontWeight: 700, marginBottom: 4 }}>{analysis.facility}</div>
-          <div style={{ color: T.muted, fontSize: 9, marginBottom: 10 }}>{analysis.region} · {analysis.headlines?.length || 0} articles analyzed</div>
+          <div style={{ color: T.cyan, fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
+            {analysis.facility || selFacility?.name}
+          </div>
+          <div style={{ color: T.muted, fontSize: 9, marginBottom: 10 }}>
+            {analysis.region || selFacility?.region}
+            {analysis.headlines?.length ? ` · ${analysis.headlines.length} articles analyzed` : ""}
+          </div>
 
-          {analysis.source === "no_news" ? (
-            <div style={{ color: T.amber, fontSize: 10 }}>⚠ No recent news found for this facility.</div>
-          ) : analysis.analysis ? (
+          {/* Error state — surface the error clearly */}
+          {analysis.error && (
+            <div style={{ background: `${T.red}11`, border: `1px solid ${T.red}44`, borderRadius: 2, padding: "8px 10px", marginBottom: 8 }}>
+              <div style={{ color: T.red, fontSize: 10, fontWeight: 700, marginBottom: 4 }}>⚠ Analysis unavailable</div>
+              <div style={{ color: T.muted, fontSize: 9, lineHeight: 1.5 }}>
+                {analysis.error.includes("ANTHROPIC_API_KEY")
+                  ? "AI analysis requires ANTHROPIC_API_KEY in backend environment. Set it in Render dashboard."
+                  : analysis.error}
+              </div>
+            </div>
+          )}
+
+          {!analysis.error && analysis.source === "no_news" && (
+            <div style={{ color: T.amber, fontSize: 10 }}>⚠ No recent news found for this facility in the last 14 days.</div>
+          )}
+
+          {!analysis.error && analysis.analysis && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ color: T.text, fontSize: 10, lineHeight: 1.6 }}>{analysis.analysis.summary}</div>
 
@@ -508,11 +535,11 @@ function FacilitiesPanel({ token, globeControlsRef }) {
               )}
 
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", flex: 1, minWidth: 120 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", flex: 1, minWidth: 110 }}>
                   <span style={{ color: T.muted, fontSize: 10 }}>Status</span>
                   <Tag color="cyan">{analysis.analysis.operationalStatus || "unknown"}</Tag>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", flex: 1, minWidth: 120 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", flex: 1, minWidth: 110 }}>
                   <span style={{ color: T.muted, fontSize: 10 }}>Signal</span>
                   <Tag color={signalColor(analysis.analysis.investmentSignal)}>{analysis.analysis.investmentSignal || "neutral"}</Tag>
                 </div>
@@ -535,19 +562,21 @@ function FacilitiesPanel({ token, globeControlsRef }) {
 
               <div style={{ fontSize: 9, color: T.muted }}>
                 Confidence: <span style={{ color: T.text }}>{Math.round((analysis.analysis.confidence || 0.6) * 100)}%</span>
-                {" · "}Haiku (news-based · ~$0.002)
+                {" · "}Haiku + Google News · ~$0.002
               </div>
+            </div>
+          )}
 
-              {analysis.headlines?.slice(0, 4).map((h, i) => (
-                <div key={i} style={{ fontSize: 9, color: T.muted, borderLeft: `2px solid ${T.border}`, paddingLeft: 8, lineHeight: 1.4 }}>
-                  [{h.daysAgo}d] {h.title}
+          {/* Always show raw headlines if available */}
+          {analysis.headlines?.length > 0 && (
+            <div style={{ marginTop: 8, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+              <div style={{ fontSize: 9, color: T.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>News Headlines</div>
+              {analysis.headlines.slice(0, 6).map((h, i) => (
+                <div key={i} style={{ fontSize: 9, color: T.muted, borderLeft: `2px solid ${T.border}`, paddingLeft: 8, lineHeight: 1.4, marginBottom: 4 }}>
+                  <span style={{ color: T.cyan }}>[{h.daysAgo}d]</span> {h.title}
                 </div>
               ))}
             </div>
-          ) : null}
-
-          {analysis.error && (
-            <div style={{ color: T.red, fontSize: 10 }}>Error: {analysis.error}</div>
           )}
         </div>
       )}
@@ -572,21 +601,22 @@ function ConflictZonePanel({ zone, token, onClose }) {
   if (!zone) return null;
   const borderColor = zone.intensity === "high" ? T.red : T.amber;
 
+  // Rendered inside the right sidebar — no position:absolute needed
   return (
-    <div style={{
-      position: "absolute", top: 12, left: 12, width: 280, zIndex: 10,
-      background: `${T.bg}f0`, border: `1px solid ${borderColor}`,
-      borderRadius: 4, padding: 14, maxHeight: "calc(100% - 24px)", overflowY: "auto",
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: borderColor, textTransform: "uppercase", marginBottom: 4 }}>
-            {zone.intensity === "high" ? "⚠ HIGH INTENSITY" : "⚠ MEDIUM INTENSITY"}
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <EyeCard style={{ border: `2px solid ${borderColor}`, boxShadow: `0 0 18px ${borderColor}22` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: borderColor, textTransform: "uppercase", marginBottom: 4 }}>
+              {zone.intensity === "high" ? "⚠ HIGH INTENSITY CONFLICT" : "⚠ ACTIVE CONFLICT ZONE"}
+            </div>
+            <div style={{ color: T.text, fontSize: 14, fontWeight: 700 }}>{zone.name}</div>
           </div>
-          <div style={{ color: T.text, fontSize: 14, fontWeight: 700 }}>{zone.name}</div>
+          <button onClick={onClose} style={{
+            background: `${T.red}22`, border: `1px solid ${T.red}66`, color: T.red,
+            fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 2, cursor: "pointer",
+          }}>✕ BACK</button>
         </div>
-        <span onClick={onClose} style={{ cursor: "pointer", color: T.muted, fontSize: 14, lineHeight: 1 }}>✕</span>
-      </div>
 
       <StabilityBar value={zone.stability} />
 
@@ -601,21 +631,21 @@ function ConflictZonePanel({ zone, token, onClose }) {
         </div>
       </div>
 
-      <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>
-        <div style={{ fontSize: 9, color: T.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Recent Intelligence</div>
-        {loading && <div style={{ color: T.muted, fontSize: 10 }}>Fetching news…</div>}
-        {!loading && news.length === 0 && <div style={{ color: T.muted, fontSize: 10 }}>No recent headlines found.</div>}
-        {news.map((item, i) => (
-          <div key={i} style={{ marginBottom: 8, paddingLeft: 8, borderLeft: `2px solid ${borderColor}44` }}>
-            <div style={{ fontSize: 10, color: T.text, lineHeight: 1.4 }}>{item.title}</div>
-            <div style={{ fontSize: 9, color: T.muted, marginTop: 2 }}>{item.daysAgo}d ago</div>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ marginTop: 8, fontSize: 9, color: T.muted }}>
-        Source: ACLED · Google News · Stability: Beta-Bernoulli (30d rolling)
-      </div>
+        <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, marginTop: 4 }}>
+          <div style={{ fontSize: 9, color: T.muted, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Recent Intelligence</div>
+          {loading && <div style={{ color: T.muted, fontSize: 10 }}>Fetching news…</div>}
+          {!loading && news.length === 0 && <div style={{ color: T.muted, fontSize: 10 }}>No recent headlines found.</div>}
+          {news.map((item, i) => (
+            <div key={i} style={{ marginBottom: 8, paddingLeft: 8, borderLeft: `2px solid ${borderColor}44` }}>
+              <div style={{ fontSize: 10, color: T.text, lineHeight: 1.4 }}>{item.title}</div>
+              <div style={{ fontSize: 9, color: T.muted, marginTop: 2 }}>{item.daysAgo}d ago</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 9, color: T.muted, marginTop: 6 }}>
+          Source: ACLED · Google News · Stability: Beta-Bernoulli (30d rolling)
+        </div>
+      </EyeCard>
     </div>
   );
 }
@@ -889,43 +919,43 @@ export default function TheEye({ token }) {
     }}>
       {/* ── Top bar ── */}
       <div style={{
-        height: 44, borderBottom: `1px solid ${T.border}`,
-        display: "flex", alignItems: "center", padding: "0 16px",
-        background: T.surface, flexShrink: 0, gap: 16,
+        borderBottom: `1px solid ${T.border}`,
+        display: "flex", alignItems: "center", padding: "0 12px",
+        background: T.surface, flexShrink: 0, gap: 10, minHeight: 44,
+        overflowX: "auto", // scrollable on narrow screens
       }}>
         <button onClick={() => setFullscreen(false)} style={{
           background: "transparent", border: `1px solid ${T.border}`, color: T.muted,
-          fontFamily: T.mono, fontSize: 10, fontWeight: 700, letterSpacing: "0.15em",
-          padding: "4px 12px", borderRadius: 2, cursor: "pointer", flexShrink: 0,
-        }}>← LEAVE</button>
+          fontFamily: T.mono, fontSize: 10, fontWeight: 700, letterSpacing: "0.1em",
+          padding: "4px 10px", borderRadius: 2, cursor: "pointer", flexShrink: 0,
+        }}>← EXIT</button>
 
-        <div style={{ fontSize: 13, fontWeight: 900, letterSpacing: "0.2em", color: T.cyan }}>THE EYE</div>
+        <div style={{ fontSize: 12, fontWeight: 900, letterSpacing: "0.2em", color: T.cyan, flexShrink: 0 }}>THE EYE</div>
 
-        {/* Fix #5: added SATS tab */}
-        <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
+        {/* Tab bar — flexShrink:0 on each button so they never collapse; container scrolls */}
+        <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
           {[
             ["space",   "SPACE INTEL", T.cyan],
-            ["ops",     "OPERATIONS",  T.cyan],
+            ["ops",     "OPS",         T.cyan],
             ["patents", "PATENTS",     T.cyan],
-            ["sats",    "SATS",        T.purple],
+            ["sats",    "SATS ⚡",    T.purple],
           ].map(([id, label, accent]) => (
-            <button key={id} onClick={() => { setActivePanel(id); setActiveZone(null); }} style={{
-              background: activePanel === id ? `${accent}22` : "transparent",
-              border: `1px solid ${activePanel === id ? accent : T.border}`,
-              color: activePanel === id ? accent : T.muted,
-              fontFamily: T.mono, fontSize: 9, fontWeight: 700,
-              letterSpacing: "0.12em", padding: "4px 12px", borderRadius: 2, cursor: "pointer",
-            }}>{label}</button>
+            <button key={id} onClick={() => { setActivePanel(id); setActiveZone(null); }}
+              style={{
+                background: activePanel === id ? `${accent}22` : "transparent",
+                border: `1px solid ${activePanel === id ? accent : T.border}`,
+                color: activePanel === id ? accent : T.muted,
+                fontFamily: T.mono, fontSize: 9, fontWeight: 700,
+                letterSpacing: "0.1em", padding: "5px 10px", borderRadius: 2,
+                cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap",
+              }}>{label}</button>
           ))}
         </div>
 
-        <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center" }}>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center", flexShrink: 0 }}>
+          <div style={{ fontFamily: T.mono, fontSize: 9, color: T.muted }}>
             <Dot color={loading ? T.amber : T.green} />
             {loading ? "SYNCING" : "LIVE"}
-          </div>
-          <div style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
-            {new Date().toUTCString().slice(0, 25)} UTC
           </div>
         </div>
       </div>
@@ -974,12 +1004,39 @@ export default function TheEye({ token }) {
             </EyeCard>
           )}
 
+          {/* Conflict zones — clickable list in left sidebar (SPACE INTEL) */}
+          {activePanel === "space" && data?.conflicts?.length > 0 && (
+            <EyeCard>
+              <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: T.red, textTransform: "uppercase", marginBottom: 8 }}>
+                ⚠ Active Conflict Zones
+              </div>
+              <div style={{ fontSize: 9, color: T.muted, marginBottom: 8 }}>Click a zone for intelligence</div>
+              {data.conflicts.slice(0, 10).map((c, i) => {
+                const col = c.intensity === "high" ? T.red : T.amber;
+                return (
+                  <div key={i} onClick={() => setActiveZone(c)} style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "5px 6px", marginBottom: 3, borderRadius: 2, cursor: "pointer",
+                    border: `1px solid ${activeZone?.name === c.name ? col : T.border}`,
+                    background: activeZone?.name === c.name ? `${col}11` : "transparent",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Dot color={col} />
+                      <span style={{ color: T.text, fontSize: 10 }}>{c.name}</span>
+                    </div>
+                    <span style={{ fontFamily: T.mono, fontSize: 9, color: col }}>{c.stability ?? "?"}%</span>
+                  </div>
+                );
+              })}
+            </EyeCard>
+          )}
+
           {/* SATS tab quick stats in left sidebar */}
           {activePanel === "sats" && (
             <EyeCard>
               <div style={{ fontSize: 9, fontFamily: T.mono, letterSpacing: "0.15em", color: T.purple, textTransform: "uppercase", marginBottom: 8 }}>GNSS Status</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <StatBox label="Tracked" value={satellites.length}  color={T.purple} />
+                <StatBox label="Tracked"   value={satellites.length}  color={T.purple} />
                 <StatBox label="Jam Zones" value={gpsjamZones.length} color={T.red} />
               </div>
             </EyeCard>
@@ -1001,7 +1058,7 @@ export default function TheEye({ token }) {
             onReady={handleViewerReady}
           />
 
-          {satellites.length > 0 && (
+          {satellites.length > 0 && !activeZone && (
             <div style={{
               position: "absolute", bottom: 12, left: 12,
               fontFamily: T.mono, fontSize: 10, color: T.muted,
@@ -1010,11 +1067,6 @@ export default function TheEye({ token }) {
             }}>
               <Dot color={T.cyan} />{satellites.length} satellites tracked · click one
             </div>
-          )}
-
-          {/* Fix #4: Conflict zone detail panel (replaces text labels on map) */}
-          {activeZone && (
-            <ConflictZonePanel zone={activeZone} token={token} onClose={() => setActiveZone(null)} />
           )}
 
           {/* Clicked-satellite info card */}
@@ -1089,8 +1141,10 @@ export default function TheEye({ token }) {
           background: T.surface, overflowY: "auto", padding: 12,
           display: "flex", flexDirection: "column", gap: 16,
         }}>
-          {/* Fix #5: SATS tab swaps in SatsPanel; other tabs show launches */}
-          {activePanel === "sats" ? (
+          {/* Zone panel takes over the right sidebar when a zone is selected */}
+          {activeZone ? (
+            <ConflictZonePanel zone={activeZone} token={token} onClose={() => setActiveZone(null)} />
+          ) : activePanel === "sats" ? (
             <SatsPanel satellites={satellites} gpsjamZones={gpsjamZones} />
           ) : (
             <>
