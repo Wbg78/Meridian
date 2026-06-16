@@ -349,6 +349,103 @@ satelliteRouter.get("/analyze/:facilityKey", async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message) }); }
 });
 
+// ─── OPS NEWS ANALYSIS (Haiku + Google News) ────────────────────
+// Per-click analysis: Google News → Haiku claude-haiku-4-5. ~$0.002/click.
+// Returns structured brief about recent operational developments.
+const HAIKU_MODEL = "claude-haiku-4-5-20251001";
+
+async function analyzeOpsWithNews(facility) {
+  if (!CLAUDE_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+
+  // 1. Fetch 14 days of Google News for this company + region
+  const query = `"${facility.company}" ${facility.region} factory operations`;
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en&gl=US&ceid=US:en`;
+  let headlines = [];
+  try {
+    const r = await fetch(rssUrl, {
+      headers: { "User-Agent": "Meridian/1.0" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (r.ok) {
+      const text = await r.text();
+      const rx = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<pubDate>([\s\S]*?)<\/pubDate>[\s\S]*?<\/item>/g;
+      let m;
+      while ((m = rx.exec(text)) !== null && headlines.length < 20) {
+        const title = m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+          .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
+        const daysAgo = Math.floor((Date.now() - new Date(m[2].trim())) / 86400000);
+        if (daysAgo <= 14) headlines.push({ title, daysAgo });
+      }
+    }
+  } catch (e) { console.warn("Google News fetch failed:", e.message); }
+
+  if (!headlines.length) {
+    return {
+      source: "no_news",
+      facility: facility.name, company: facility.company, region: facility.region,
+      analysis: null, headlines: [],
+    };
+  }
+
+  // 2. Haiku analysis — one call, all headlines in a single prompt
+  const prompt = `You are an operational intelligence analyst. Assess recent activity at ${facility.name} (${facility.company}, ${facility.region} — ${facility.type}).
+
+Facility context: ${facility.strategicNote}
+
+Recent news headlines (last 14 days):
+${headlines.map((h, i) => `${i + 1}. [${h.daysAgo}d ago] ${h.title}`).join("\n")}
+
+Respond ONLY with valid JSON:
+{
+  "summary": "2-3 sentence operational overview based on the news",
+  "keyDevelopments": ["up to 3 most significant developments"],
+  "operationalStatus": "fully operational|partial|expansion|restructuring|unknown",
+  "sentiment": "bullish|neutral|bearish",
+  "riskFactors": ["key risks or challenges mentioned"],
+  "investmentSignal": "bullish|neutral|bearish",
+  "rationale": "1-sentence investment rationale",
+  "confidence": 0.0
+}`;
+
+  const r2 = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": CLAUDE_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: HAIKU_MODEL,
+      max_tokens: 600,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const raw = await r2.text();
+  if (!r2.ok) throw new Error(`Anthropic ${r2.status}: ${raw.slice(0, 120)}`);
+  const data = JSON.parse(raw);
+  const txt = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  const first = txt.indexOf("{"), last = txt.lastIndexOf("}");
+  if (first < 0 || last < 0) throw new Error("No JSON in Haiku response");
+  const analysis = JSON.parse(txt.slice(first, last + 1));
+  analysis.confidence = parseFloat(analysis.confidence) || 0.6;
+
+  return {
+    source: "haiku_news", facility: facility.name,
+    company: facility.company, region: facility.region,
+    headlines, analysis,
+  };
+}
+
+satelliteRouter.get("/ops-news/:facilityKey", async (req, res) => {
+  try {
+    const facility = FACILITIES[req.params.facilityKey];
+    if (!facility) return res.status(404).json({ error: "Unknown facility" });
+    const result = await analyzeOpsWithNews(facility);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e.message) }); }
+});
+
 satelliteRouter.get("/all", async (req, res) => {
   try {
     const results = await Promise.allSettled(
