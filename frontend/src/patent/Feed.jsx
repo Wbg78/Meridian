@@ -1,12 +1,13 @@
 // frontend/src/patent/Feed.jsx
 // Patent news feed — organised by industry, CLICK-to-expand only (no auto-fetch).
-// Data: EPO OPS via GET /api/patents/feed?industry= (IPC classification + 90-day window).
+// Data: EPO OPS via GET /api/patents/feed?industry=&region=&days= (IPC + region + window).
 // AI: GET /api/patents/analyze/:number (Haiku) — degrades gracefully without key.
+// Figures: GET /api/patents/figure/:number (best-effort PDF proxy).
 //
 // TODO: ontology ingestion hook — when a patent is opened in the Reader, the
 // normalised PatentEvent object below can later be pushed into the digital-twin graph.
 
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 
@@ -19,6 +20,24 @@ const INDUSTRIES = [
   { id: "energy",         label: "Energy & Grid" },
   { id: "biotech",        label: "Biotech & Pharma" },
   { id: "robotics",       label: "Robotics & Automation" },
+  { id: "computing",      label: "Computing & Connectivity" },
+  { id: "mobility",       label: "Mobility & Space" },
+  { id: "health_bio",     label: "Health & Bio" },
+  { id: "adv_mfg",        label: "Advanced Mfg & Materials" },
+];
+
+const REGIONS = [
+  { id: "us_eu",      label: "US + Europe" },
+  { id: "us",         label: "US only" },
+  { id: "us_eu_jpkr", label: "US + EU + JP/KR" },
+  { id: "global",     label: "Global (incl. China)" },
+];
+
+const TIMESPANS = [
+  { id: 30,  label: "Last 30 days" },
+  { id: 90,  label: "Last 90 days" },
+  { id: 180, label: "Last 6 months" },
+  { id: 365, label: "Last 12 months" },
 ];
 
 // ─── Primitive components ────────────────────────────────────────
@@ -45,6 +64,18 @@ function Pill({ color, children }) {
   );
 }
 
+function Dropdown({ value, options, onChange }) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="bg-[var(--card)] border border-[var(--border)] rounded-xl text-xs text-[var(--text)] px-2.5 py-1.5 cursor-pointer hover:border-violet-500/40 transition-colors focus:outline-none focus:border-violet-500/60"
+    >
+      {options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+    </select>
+  );
+}
+
 // First sentence of abstract
 function firstSentence(text) {
   if (!text) return "";
@@ -66,9 +97,56 @@ function toPatentEvent(patent, industry, analysis) {
       industryApplication: analysis.industryApplication,
       competitiveAdvantage: analysis.competitiveAdvantage,
       investmentSignal: analysis.investmentSignal,
+      threatTo: analysis.threatTo || [],
+      benefitsTo: analysis.benefitsTo || [],
       designComponents: analysis.designComponents || [],
     } : null,
   };
+}
+
+// ─── Patent figure (best-effort OPS PDF proxy) ──────────────────
+function PatentFigure({ number, token }) {
+  const [url, setUrl]       = useState(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objUrl;
+    setUrl(null); setFailed(false);
+    fetch(`${BACKEND}/api/patents/figure/${encodeURIComponent(number)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => { if (!r.ok) throw new Error("no figure"); return r.blob(); })
+      .then(b => {
+        if (cancelled) return;
+        objUrl = URL.createObjectURL(b);
+        setUrl(objUrl);
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; if (objUrl) URL.revokeObjectURL(objUrl); };
+  }, [number, token]);
+
+  if (failed) {
+    return (
+      <div className="w-full h-24 rounded-xl border border-[var(--border)] bg-[var(--card)] flex items-center justify-center text-[var(--muted)] text-sm">
+        No representative figure available
+      </div>
+    );
+  }
+  if (!url) {
+    return (
+      <div className="w-full h-40 rounded-xl border border-[var(--border)] bg-[var(--card)] flex items-center justify-center text-[var(--muted)] text-xs animate-pulse">
+        Loading drawing…
+      </div>
+    );
+  }
+  return (
+    <iframe
+      title={`Drawing for ${number}`}
+      src={url}
+      className="w-full h-72 rounded-xl border border-[var(--border)] bg-white"
+    />
+  );
 }
 
 // ─── Patent Reader (slide-up modal) ─────────────────────────────
@@ -77,26 +155,28 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiErr, setAiErr]         = useState(null);
 
-  useState(() => {
+  useEffect(() => {
     if (!patent) return;
+    let cancelled = false;
     setAnalysis(null); setAiErr(null); setAiLoading(true);
     fetch(`${BACKEND}/api/patents/analyze/${encodeURIComponent(patent.number)}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => r.json())
       .then(d => {
-        if (d.error) { setAiErr(d.error); } else { setAnalysis(d.analysis); }
+        if (cancelled) return;
+        if (d.error) setAiErr(d.error); else setAnalysis(d.analysis);
         setAiLoading(false);
       })
-      .catch(e => { setAiErr(e.message); setAiLoading(false); });
+      .catch(e => { if (!cancelled) { setAiErr(e.message); setAiLoading(false); } });
+    return () => { cancelled = true; };
   }, [patent, token]);
 
   if (!patent) return null;
 
-  const numClean = patent.number.replace(/[^A-Z0-9]/gi, "");
-  const figUrl = `https://patentimages.storage.googleapis.com/thumbnails/${numClean}.png`;
   const patentEvent = toPatentEvent(patent, industry, analysis);
   const signalColor = s => s === "bullish" ? "green" : s === "bearish" ? "red" : "amber";
+  const hasImpact = analysis && ((analysis.threatTo?.length > 0) || (analysis.benefitsTo?.length > 0) || analysis.investmentSignal);
 
   return (
     <div
@@ -126,18 +206,7 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
 
         <div className="p-5 space-y-5" style={{ maxWidth: "70ch", margin: "0 auto" }}>
           {/* Figure */}
-          <img
-            src={figUrl}
-            alt={`Figure for ${patent.number}`}
-            className="w-full max-h-48 object-contain rounded-xl border border-[var(--border)] bg-[var(--card)]"
-            onError={e => {
-              e.currentTarget.style.display = "none";
-              e.currentTarget.nextSibling.style.display = "flex";
-            }}
-          />
-          <div className="hidden w-full h-24 rounded-xl border border-[var(--border)] bg-[var(--card)] items-center justify-center text-[var(--muted)] text-sm">
-            No representative figure available
-          </div>
+          <PatentFigure number={patent.number} token={token} />
 
           {/* AI Summary */}
           <div>
@@ -185,6 +254,43 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
             )}
           </div>
 
+          {/* Investment Impact — who this directly affects */}
+          {hasImpact && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-violet-400 mb-2">
+                Investment Impact — who this affects
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-red-500/8 border border-red-500/25 rounded-xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-red-400 mb-1.5">⚠ Threatens</p>
+                  {analysis.threatTo?.length > 0 ? (
+                    <ul className="space-y-1">
+                      {analysis.threatTo.map((c, i) => (
+                        <li key={i} className="text-[var(--text)] text-xs">• {c}</li>
+                      ))}
+                    </ul>
+                  ) : <p className="text-[var(--muted)] text-xs">No clear competitive threat identified.</p>}
+                </div>
+                <div className="bg-emerald-500/8 border border-emerald-500/25 rounded-xl p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 mb-1.5">✓ Benefits</p>
+                  {analysis.benefitsTo?.length > 0 ? (
+                    <ul className="space-y-1">
+                      {analysis.benefitsTo.map((c, i) => (
+                        <li key={i} className="text-[var(--text)] text-xs">• {c}</li>
+                      ))}
+                    </ul>
+                  ) : <p className="text-[var(--muted)] text-xs">No clear beneficiary identified.</p>}
+                </div>
+              </div>
+              {analysis.investmentRationale && (
+                <div className="mt-3 bg-[var(--card)] border border-[var(--border)] rounded-xl p-3">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">Rationale</span>
+                  <p className="text-[var(--text)] text-xs leading-relaxed mt-1">{analysis.investmentRationale}</p>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Original filed text */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--muted)] mb-2">
@@ -220,8 +326,8 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
 }
 
 // ─── Industry Section (click-to-expand only — NO auto-fetch) ─────
-// Fetches on first expand; subsequent expands use cached state.
-function IndustrySection({ industry, token, onSelect }) {
+// Re-mounts (via key) when region/days change, so the cache is per-filter.
+function IndustrySection({ industry, region, days, token, onSelect }) {
   const [open, setOpen]       = useState(false);
   const [patents, setPatents] = useState([]);
   const [loaded, setLoaded]   = useState(false);
@@ -232,9 +338,8 @@ function IndustrySection({ industry, token, onSelect }) {
     if (loaded || loading) return;
     setLoading(true);
     setErr(null);
-    fetch(`${BACKEND}/api/patents/feed?industry=${encodeURIComponent(industry.id)}&limit=10`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    const qs = `industry=${encodeURIComponent(industry.id)}&region=${encodeURIComponent(region)}&days=${days}&limit=12`;
+    fetch(`${BACKEND}/api/patents/feed?${qs}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(async r => {
         const d = await r.json();
         if (!r.ok || d.error) {
@@ -250,11 +355,8 @@ function IndustrySection({ industry, token, onSelect }) {
         setLoaded(true);
         setLoading(false);
       })
-      .catch(e => {
-        setErr({ type: "error", message: e.message });
-        setLoading(false);
-      });
-  }, [loaded, loading, industry.id, token]);
+      .catch(e => { setErr({ type: "error", message: e.message }); setLoading(false); });
+  }, [loaded, loading, industry.id, region, days, token]);
 
   function handleToggle() {
     const next = !open;
@@ -284,10 +386,7 @@ function IndustrySection({ industry, token, onSelect }) {
   return (
     <div className="space-y-2">
       {/* Clickable header — the ONLY trigger for loading */}
-      <button
-        onClick={handleToggle}
-        className="w-full flex items-center justify-between group py-1"
-      >
+      <button onClick={handleToggle} className="w-full flex items-center justify-between group py-1">
         <div className="flex items-center gap-2">
           <span className="text-[var(--text)] font-black text-sm group-hover:text-violet-400 transition-colors">
             {industry.label}
@@ -318,7 +417,9 @@ function IndustrySection({ industry, token, onSelect }) {
           <ErrorBanner />
 
           {loaded && patents.length === 0 && !err && (
-            <p className="text-[var(--muted)] text-xs px-1">No recent filings found in the last 90 days.</p>
+            <p className="text-[var(--muted)] text-xs px-1">
+              No recent filings in this region/window. Try a wider region or longer timespan.
+            </p>
           )}
 
           {patents.length > 0 && (
@@ -329,7 +430,10 @@ function IndustrySection({ industry, token, onSelect }) {
                   onClick={() => onSelect(p, industry.id)}
                   className="flex-shrink-0 w-56 space-y-1.5"
                 >
-                  <p className="text-[var(--muted)] text-[10px] font-mono">{p.date || "—"}</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[var(--muted)] text-[10px] font-mono">{p.date || "—"}</p>
+                    {p.country && <Pill color="violet">{p.country}</Pill>}
+                  </div>
                   <p className="text-violet-400 text-[11px] font-bold truncate">{p.assignee}</p>
                   <p className="text-[var(--text)] text-xs font-semibold leading-tight line-clamp-2">{p.title}</p>
                   <p className="text-[var(--muted)] text-[10px] leading-relaxed line-clamp-2">
@@ -349,6 +453,8 @@ function IndustrySection({ industry, token, onSelect }) {
 export default function Feed({ token, onSandboxLoad }) {
   const [selected, setSelected]             = useState(null);
   const [recentlyViewed, setRecentlyViewed] = useState([]);
+  const [region, setRegion]                 = useState("us_eu");
+  const [days, setDays]                     = useState(90);
 
   function handleSelect(patent, industryId) {
     setSelected({ patent, industry: industryId });
@@ -360,10 +466,15 @@ export default function Feed({ token, onSandboxLoad }) {
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between mb-4">
-        <p className="text-[var(--muted)] text-xs">
-          IPC classification · 90-day window · click a section to load
-        </p>
+      {/* Filter bar */}
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Dropdown value={region} options={REGIONS} onChange={setRegion} />
+          <Dropdown value={days} options={TIMESPANS} onChange={v => setDays(+v)} />
+          <span className="text-[var(--muted)] text-[10px] hidden sm:inline">
+            click a section to load
+          </span>
+        </div>
         {recentlyViewed.length > 0 && (
           <button
             onClick={() => onSandboxLoad(null, recentlyViewed)}
@@ -374,10 +485,17 @@ export default function Feed({ token, onSandboxLoad }) {
         )}
       </div>
 
+      {/* Industry sections — keyed by filter so changing region/days resets them */}
       <div className="divide-y divide-[var(--border)]">
         {INDUSTRIES.map(ind => (
-          <div key={ind.id} className="py-3">
-            <IndustrySection industry={ind} token={token} onSelect={handleSelect} />
+          <div key={`${ind.id}-${region}-${days}`} className="py-3">
+            <IndustrySection
+              industry={ind}
+              region={region}
+              days={days}
+              token={token}
+              onSelect={handleSelect}
+            />
           </div>
         ))}
       </div>

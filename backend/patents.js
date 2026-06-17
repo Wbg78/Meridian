@@ -106,6 +106,7 @@ function normalizeDoc(doc) {
     const pubNumber = `${country}${num}${kind}`;
     return {
       number: pubNumber,
+      country,                 // ← used for region filtering
       title,
       date,
       abstract,
@@ -252,6 +253,7 @@ const FEED_TTL = 6 * 3600_000;  // 6 h — recent filings change daily
 
 // IPC classification codes per industry section.
 // IPC field in OPS CQL is `ic`. Parentheses required for OR expressions.
+// Only 4-character IPC subclass codes are used — these parse reliably in OPS CQL.
 const INDUSTRY_IPC = {
   semiconductors: `ic="H01L"`,
   aerospace:      `(ic="B64C" or ic="B64D" or ic="B64G" or ic="F42B")`,
@@ -259,6 +261,21 @@ const INDUSTRY_IPC = {
   energy:         `(ic="H02J" or ic="H02S" or ic="H01M" or ic="F03D")`,
   biotech:        `(ic="A61K" or ic="C12N" or ic="A61P")`,
   robotics:       `(ic="B25J" or ic="G05B" or ic="G05D")`,
+  // ── Added bundles ──
+  computing:      `(ic="H04W" or ic="H04L" or ic="H04B")`,            // 5G/6G, networking, cybersecurity
+  mobility:       `(ic="B60L" or ic="B60W" or ic="B64G")`,            // EV propulsion, autonomous, satellites
+  health_bio:     `(ic="A61B" or ic="A61M" or ic="C12Q")`,            // medical devices, drug delivery, diagnostics/genomics
+  adv_mfg:        `(ic="B33Y" or ic="B82Y" or ic="G02B" or ic="H01S")`, // 3D printing, nanotech, photonics, lasers
+};
+
+// Region → set of publication-country codes used to filter the result pool.
+// null = no filter (global).
+const EU_COUNTRIES = ["EP", "DE", "FR", "GB", "NL", "CH", "SE", "IT", "ES", "FI", "DK", "NO", "AT", "BE", "IE", "PL"];
+const REGION_COUNTRIES = {
+  us:         ["US"],
+  us_eu:      ["US", ...EU_COUNTRIES],
+  us_eu_jpkr: ["US", ...EU_COUNTRIES, "JP", "KR"],
+  global:     null,
 };
 
 function recentDateWindow(days = 90) {
@@ -284,10 +301,11 @@ export async function patentsHealthHandler(req, res) {
   }
 }
 
-// GET /api/patents/feed?industry=semiconductors&limit=10
-// Returns { industry, docs[], fetchedAt } or { error, code }
+// GET /api/patents/feed?industry=semiconductors&region=us_eu&days=90&limit=12
+// region ∈ {us, us_eu, us_eu_jpkr, global}; days ∈ [7,365]
+// Returns { industry, region, days, docs[], poolSize, fetchedAt } or { error, code }
 patentsRouter.get("/feed", async (req, res) => {
-  const { industry, limit } = req.query;
+  const { industry, limit, region = "us_eu", days } = req.query;
   if (!industry) return res.status(400).json({ error: "need ?industry=semiconductors" });
   const ipcFilter = INDUSTRY_IPC[industry];
   if (!ipcFilter) {
@@ -295,17 +313,27 @@ patentsRouter.get("/feed", async (req, res) => {
       error: `Unknown industry "${industry}". Valid: ${Object.keys(INDUSTRY_IPC).join(", ")}`,
     });
   }
+  const allowed = region in REGION_COUNTRIES ? REGION_COUNTRIES[region] : REGION_COUNTRIES.us_eu;
+  const windowDays = Math.min(Math.max(+days || 90, 7), 365);
+  const n = Math.min(+limit || 12, 25);
 
-  const cacheKey = `feed_${industry}`;
+  const cacheKey = `feed_${industry}_${region}_${windowDays}`;
   const hit = CACHE.get(cacheKey);
   if (hit && Date.now() - hit.at < FEED_TTL) return res.json(hit.data);
 
   try {
-    const window = recentDateWindow(90);
+    const window = recentDateWindow(windowDays);
     const cql = `${ipcFilter} and pd within "${window}"`;
-    const n = Math.min(+limit || 10, 25);
-    const { docs } = await opsSearch(cql, `1-${n}`);
-    const data = { industry, docs, fetchedAt: new Date().toISOString() };
+    // Fetch a larger pool, then filter by country region-side so "US only"
+    // doesn't get drowned out by high-volume CN filings.
+    const { docs: pool } = await opsSearch(cql, "1-50");
+    const filtered = allowed ? pool.filter(d => allowed.includes(d.country)) : pool;
+    const docs = filtered.slice(0, n);
+    const data = {
+      industry, region, days: windowDays,
+      docs, poolSize: pool.length,
+      fetchedAt: new Date().toISOString(),
+    };
     CACHE.set(cacheKey, { at: Date.now(), data });
     res.json(data);
   } catch (e) {
@@ -317,6 +345,55 @@ patentsRouter.get("/feed", async (req, res) => {
       return res.status(429).json({ error: "EPO OPS quota exceeded — try again later", code: "QUOTA_EXCEEDED" });
     }
     res.status(500).json({ error: msg });
+  }
+});
+
+// GET /api/patents/figure/:number
+// Best-effort patent drawing proxy. Calls the OPS images service, finds the
+// "Drawing" (or first-page) instance, and streams page 1 back as a PDF.
+// Returns 404 on any failure so the frontend shows its placeholder — never breaks the reader.
+const FIGURE_CACHE = new Map();   // number → { at, buf }  (PDF buffer)
+patentsRouter.get("/figure/:number", async (req, res) => {
+  const number = String(req.params.number || "").toUpperCase();
+  const m = number.match(/^([A-Z]{2})(\d+)([A-Z]\d?)?$/);
+  if (!m) return res.status(400).json({ error: "bad patent number" });
+  const [, country, num, kind] = m;
+
+  const hit = FIGURE_CACHE.get(number);
+  if (hit && Date.now() - hit.at < PATENT_TTL) {
+    res.set("Content-Type", "application/pdf");
+    return res.send(hit.buf);
+  }
+
+  try {
+    const token = await getOpsToken();
+    const docId = [country, num, kind].filter(Boolean).join(".");
+    // 1) Images inquiry — list available image instances for this publication.
+    const inqUrl = `${OPS_BASE}/published-data/publication/docdb/${docId}/images`;
+    const inqR = await fetch(inqUrl, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
+    if (!inqR.ok) return res.status(404).json({ error: "no images for this publication" });
+    const inq = await inqR.json();
+
+    const instances = A(
+      inq?.["ops:world-patent-data"]?.["ops:document-inquiry"]?.["ops:inquiry-result"]?.["ops:document-instance"]
+    );
+    // Prefer a Drawing; fall back to FullDocument / first available.
+    const drawing = instances.find(i => i["@desc"] === "Drawing")
+      || instances.find(i => i["@desc"] === "FullDocument")
+      || instances[0];
+    const link = drawing?.["@link"];
+    if (!link) return res.status(404).json({ error: "no drawing instance" });
+
+    // 2) Retrieve page 1 as PDF.
+    const imgUrl = `${OPS_BASE}/${link}.pdf?Range=1`;
+    const imgR = await fetch(imgUrl, { headers: { Authorization: `Bearer ${token}`, Accept: "application/pdf" } });
+    if (!imgR.ok) return res.status(404).json({ error: "drawing fetch failed" });
+    const buf = Buffer.from(await imgR.arrayBuffer());
+    FIGURE_CACHE.set(number, { at: Date.now(), buf });
+    res.set("Content-Type", "application/pdf");
+    res.send(buf);
+  } catch (e) {
+    res.status(404).json({ error: String(e.message) });
   }
 });
 
@@ -376,11 +453,10 @@ patentsRouter.post("/explain-part", async (req, res) => {
     });
   }
   try {
-    const prompt = `You are "Boss William", a friendly, encouraging engineering mentor.
-A user clicked the part "${component}" in a 3D schematic model of the patent "${title || patentNumber}".
-The patent's core innovation: ${coreInnovation || "n/a"}.
-This part's function: ${fn || "n/a"}. Modeling hint: ${cadHint || "n/a"}.
-Explain in 2-4 warm, plain-language sentences what this specific part does and why it matters to the product. Avoid jargon; if you must use a technical term, gloss it briefly.`;
+    const prompt = `You are "Boss William", a friendly engineering mentor.
+A user clicked the part "${component}" in a schematic model of the patent "${title || patentNumber}".
+Core innovation: ${coreInnovation || "n/a"}. This part's function: ${fn || "n/a"}.
+In EXACTLY 1-2 short sentences (max 40 words total), say plainly what this part does and why it matters. No preamble, no jargon.`;
 
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -391,7 +467,7 @@ Explain in 2-4 warm, plain-language sentences what this specific part does and w
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 400,
+        max_tokens: 120,
         messages: [{ role: "user", content: prompt }],
       }),
     });

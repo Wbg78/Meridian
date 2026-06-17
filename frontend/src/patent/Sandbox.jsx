@@ -18,20 +18,63 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 
 // ─── Geometry heuristic from cadHint / component name ────────────
+// Representative primitive only — NOT a real CAD reconstruction.
 function pickGeometry(component, cadHint) {
   const s = `${component} ${cadHint || ""}`.toLowerCase();
-  if (/shaft|rod|tube|pipe|cylinder|column|barrel|axle|spindle/.test(s))
-    return new THREE.CylinderGeometry(0.12, 0.12, 0.8, 18);
-  if (/dome|lens|ball|sphere|globe|bubble|node/.test(s))
-    return new THREE.SphereGeometry(0.28, 20, 14);
-  if (/ring|coil|torus|loop/.test(s))
-    return new THREE.TorusGeometry(0.22, 0.07, 10, 24);
-  if (/plate|board|sheet|panel|layer|wafer|substrate/.test(s))
-    return new THREE.BoxGeometry(0.9, 0.06, 0.7);
-  if (/cone|nozzle|tip/.test(s))
-    return new THREE.ConeGeometry(0.18, 0.55, 14);
-  // default: box (housing / enclosure / generic)
-  return new THREE.BoxGeometry(0.55, 0.55, 0.55);
+  // cylindrical
+  if (/shaft|rod|tube|pipe|cylinder|column|barrel|axle|spindle|pin|pole|stem|duct|channel|bore/.test(s))
+    return new THREE.CylinderGeometry(0.1, 0.1, 0.9, 24);
+  // capsule-like (battery, cell, actuator, piston)
+  if (/battery|cell|capacitor|actuator|piston|cartridge|capsule|valve/.test(s))
+    return new THREE.CapsuleGeometry(0.16, 0.5, 8, 16);
+  // spherical
+  if (/dome|lens|ball|sphere|globe|bubble|node|bearing|optic/.test(s))
+    return new THREE.SphereGeometry(0.3, 24, 16);
+  // toroidal (rings, coils, gears, seals)
+  if (/ring|coil|torus|loop|gasket|seal|o-ring|winding|gear|rotor|stator/.test(s))
+    return new THREE.TorusGeometry(0.24, 0.07, 12, 28);
+  // flat plate / pcb / wafer / membrane
+  if (/plate|board|sheet|panel|layer|wafer|substrate|membrane|film|fin|pcb|chip|die|electrode|anode|cathode/.test(s))
+    return new THREE.BoxGeometry(0.95, 0.06, 0.7);
+  // cone / nozzle
+  if (/cone|nozzle|tip|funnel|horn|taper|antenna/.test(s))
+    return new THREE.ConeGeometry(0.22, 0.6, 20);
+  // housing / enclosure / frame → larger box
+  if (/hous|enclos|case|cabinet|frame|chassis|body|shell|block|module|unit/.test(s))
+    return new THREE.BoxGeometry(0.72, 0.6, 0.72);
+  // default: medium box
+  return new THREE.BoxGeometry(0.5, 0.5, 0.5);
+}
+
+// ─── Floating name label (canvas sprite) so each part is identifiable ──
+function makeLabel(text) {
+  const label = (text || "part").length > 22 ? text.slice(0, 21) + "…" : (text || "part");
+  const fontSize = 44, pad = 10;
+  const canvas = document.createElement("canvas");
+  let ctx = canvas.getContext("2d");
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  const textW = Math.ceil(ctx.measureText(label).width);
+  canvas.width = textW + pad * 2;
+  canvas.height = fontSize + pad * 2;
+  ctx = canvas.getContext("2d");
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.fillStyle = "rgba(10,10,15,0.85)";
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(0, 0, canvas.width, canvas.height, 14); ctx.fill(); }
+  else ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#e2e8f0";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, pad, canvas.height / 2 + 2);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  const sprite = new THREE.Sprite(mat);
+  const scale = 0.004;
+  sprite.scale.set(canvas.width * scale, canvas.height * scale, 1);
+  sprite.position.set(0, 0.7, 0);
+  sprite.renderOrder = 999;
+  sprite.userData.isLabel = true;
+  return sprite;
 }
 
 // Palette — one colour per part index, vivid but themeable
@@ -67,6 +110,9 @@ function buildAssembly(components) {
     mesh.position.set(x, 0, z);
     mesh.castShadow    = true;
     mesh.receiveShadow = true;
+
+    // Floating label so every part is identifiable at a glance
+    mesh.add(makeLabel(comp.component));
 
     // Store component metadata on the mesh for picking + Boss William
     mesh.userData = {
@@ -468,11 +514,12 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
     const scene = sceneRef.current;
     if (!scene) return;
 
-    // Clear existing assembly
+    // Clear existing assembly (incl. label sprite textures)
     meshesRef.current.forEach(m => {
       scene.remove(m);
       m.geometry.dispose();
       m.material.dispose();
+      m.children.forEach(c => { c.material?.map?.dispose?.(); c.material?.dispose?.(); });
     });
     meshesRef.current = [];
     transformRef.current?.detach();
