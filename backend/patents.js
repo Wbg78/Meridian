@@ -247,7 +247,79 @@ async function fetchIndustryLandscape(technology) {
   return result;
 }
 
+// ─── FEED — industry feed (IPC classification + 90-day window) ──
+const FEED_TTL = 6 * 3600_000;  // 6 h — recent filings change daily
+
+// IPC classification codes per industry section.
+// IPC field in OPS CQL is `ic`. Parentheses required for OR expressions.
+const INDUSTRY_IPC = {
+  semiconductors: `ic="H01L"`,
+  aerospace:      `(ic="B64C" or ic="B64D" or ic="B64G" or ic="F42B")`,
+  ai_ml:          `ic="G06N"`,
+  energy:         `(ic="H02J" or ic="H02S" or ic="H01M" or ic="F03D")`,
+  biotech:        `(ic="A61K" or ic="C12N" or ic="A61P")`,
+  robotics:       `(ic="B25J" or ic="G05B" or ic="G05D")`,
+};
+
+function recentDateWindow(days = 90) {
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 24 * 3600_000);
+  const fmt = d => d.toISOString().slice(0, 10).replace(/-/g, "");
+  return `${fmt(start)} ${fmt(end)}`;
+}
+
 // ─── ROUTES ─────────────────────────────────────────────────────
+
+// Diagnostic: GET /api/patents/health
+// Tests OPS token fetch in isolation so auth can be confirmed before the feed.
+patentsRouter.get("/health", async (req, res) => {
+  if (!OPS_KEY || !OPS_SECRET) {
+    return res.json({ ok: false, error: "EPO_OPS_KEY/EPO_OPS_SECRET not set in environment" });
+  }
+  try {
+    await getOpsToken();
+    res.json({ ok: true, message: "OPS auth OK — token acquired successfully" });
+  } catch (e) {
+    res.json({ ok: false, error: String(e.message) });
+  }
+});
+
+// GET /api/patents/feed?industry=semiconductors&limit=10
+// Returns { industry, docs[], fetchedAt } or { error, code }
+patentsRouter.get("/feed", async (req, res) => {
+  const { industry, limit } = req.query;
+  if (!industry) return res.status(400).json({ error: "need ?industry=semiconductors" });
+  const ipcFilter = INDUSTRY_IPC[industry];
+  if (!ipcFilter) {
+    return res.status(400).json({
+      error: `Unknown industry "${industry}". Valid: ${Object.keys(INDUSTRY_IPC).join(", ")}`,
+    });
+  }
+
+  const cacheKey = `feed_${industry}`;
+  const hit = CACHE.get(cacheKey);
+  if (hit && Date.now() - hit.at < FEED_TTL) return res.json(hit.data);
+
+  try {
+    const window = recentDateWindow(90);
+    const cql = `${ipcFilter} and pd within "${window}"`;
+    const n = Math.min(+limit || 10, 25);
+    const { docs } = await opsSearch(cql, `1-${n}`);
+    const data = { industry, docs, fetchedAt: new Date().toISOString() };
+    CACHE.set(cacheKey, { at: Date.now(), data });
+    res.json(data);
+  } catch (e) {
+    const msg = String(e.message);
+    if (msg.includes("EPO_OPS_KEY") || msg.includes("OPS auth 4")) {
+      return res.status(401).json({ error: msg, code: "AUTH_FAILED" });
+    }
+    if (msg.includes("403")) {
+      return res.status(429).json({ error: "EPO OPS quota exceeded — try again later", code: "QUOTA_EXCEEDED" });
+    }
+    res.status(500).json({ error: msg });
+  }
+});
+
 patentsRouter.get("/search", async (req, res) => {
   const { q, assignee, limit } = req.query;
   if (!q) return res.status(400).json({ error: "need ?q=search+term" });

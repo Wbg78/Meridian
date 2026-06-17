@@ -1,27 +1,27 @@
 // frontend/src/patent/Feed.jsx
-// Patent news feed — organised by industry, lazy-loaded via IntersectionObserver.
-// Data: EPO OPS (via existing backend /api/patents/search) → free, already wired.
+// Patent news feed — organised by industry, CLICK-to-expand only (no auto-fetch).
+// Data: EPO OPS via GET /api/patents/feed?industry= (IPC classification + 90-day window).
 // AI: GET /api/patents/analyze/:number (Haiku) — degrades gracefully without key.
 //
 // TODO: ontology ingestion hook — when a patent is opened in the Reader, the
 // normalised PatentEvent object below can later be pushed into the digital-twin graph.
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 
 // ─── Industry config ─────────────────────────────────────────────
-// Add new entries here to expand the feed.
+// id must match the key in backend INDUSTRY_IPC map.
 const INDUSTRIES = [
-  { id: "semiconductors",    label: "Semiconductors",      query: "semiconductor transistor fabrication" },
-  { id: "aerospace",         label: "Aerospace & Defense", query: "aerospace propulsion guidance defense" },
-  { id: "ai_ml",             label: "AI & Machine Learning",query: "neural network machine learning inference" },
-  { id: "energy",            label: "Energy & Grid",       query: "power grid transformer renewable energy" },
-  { id: "biotech",           label: "Biotech & Pharma",    query: "biologic drug delivery CRISPR gene therapy" },
-  { id: "robotics",          label: "Robotics & Automation",query: "robot actuator autonomous manipulation" },
+  { id: "semiconductors", label: "Semiconductors" },
+  { id: "aerospace",      label: "Aerospace & Defense" },
+  { id: "ai_ml",          label: "AI & Machine Learning" },
+  { id: "energy",         label: "Energy & Grid" },
+  { id: "biotech",        label: "Biotech & Pharma" },
+  { id: "robotics",       label: "Robotics & Automation" },
 ];
 
-// Primitive re-used components (match App.jsx's CSS-var palette)
+// ─── Primitive components ────────────────────────────────────────
 function FCard({ children, className = "", accent, onClick }) {
   return (
     <div
@@ -77,7 +77,7 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiErr, setAiErr]         = useState(null);
 
-  useEffect(() => {
+  useState(() => {
     if (!patent) return;
     setAnalysis(null); setAiErr(null); setAiLoading(true);
     fetch(`${BACKEND}/api/patents/analyze/${encodeURIComponent(patent.number)}`, {
@@ -93,12 +93,9 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
 
   if (!patent) return null;
 
-  // Google Patents thumbnail URL (representative figure)
   const numClean = patent.number.replace(/[^A-Z0-9]/gi, "");
   const figUrl = `https://patentimages.storage.googleapis.com/thumbnails/${numClean}.png`;
-
   const patentEvent = toPatentEvent(patent, industry, analysis);
-
   const signalColor = s => s === "bullish" ? "green" : s === "bearish" ? "red" : "amber";
 
   return (
@@ -138,23 +135,19 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
               e.currentTarget.nextSibling.style.display = "flex";
             }}
           />
-          <div
-            className="hidden w-full h-24 rounded-xl border border-[var(--border)] bg-[var(--card)] items-center justify-center text-[var(--muted)] text-sm"
-          >
+          <div className="hidden w-full h-24 rounded-xl border border-[var(--border)] bg-[var(--card)] items-center justify-center text-[var(--muted)] text-sm">
             No representative figure available
           </div>
 
           {/* AI Summary */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-violet-400 mb-2">AI Summary</p>
-            {aiLoading && (
-              <p className="text-[var(--muted)] text-sm">Analyzing with Claude Haiku…</p>
-            )}
+            {aiLoading && <p className="text-[var(--muted)] text-sm">Analyzing with Claude Haiku…</p>}
             {aiErr && (
               <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3">
                 <p className="text-amber-400 text-xs font-semibold">AI summary unavailable</p>
                 <p className="text-[var(--muted)] text-xs mt-1">
-                  {aiErr.includes("ANTHROPIC_API_KEY") || aiErr.includes("OPS")
+                  {aiErr.includes("ANTHROPIC_API_KEY")
                     ? "Set ANTHROPIC_API_KEY in the backend environment to enable AI summaries."
                     : aiErr}
                 </p>
@@ -226,87 +219,126 @@ function PatentReader({ patent, token, industry, onClose, onSandboxLoad }) {
   );
 }
 
-// ─── Industry Section (lazy-loaded) ─────────────────────────────
+// ─── Industry Section (click-to-expand only — NO auto-fetch) ─────
+// Fetches on first expand; subsequent expands use cached state.
 function IndustrySection({ industry, token, onSelect }) {
+  const [open, setOpen]       = useState(false);
   const [patents, setPatents] = useState([]);
   const [loaded, setLoaded]   = useState(false);
   const [loading, setLoading] = useState(false);
-  const [err, setErr]         = useState(null);
-  const ref = useRef(null);
+  const [err, setErr]         = useState(null);  // { type, message }
 
   const load = useCallback(() => {
     if (loaded || loading) return;
     setLoading(true);
-    fetch(`${BACKEND}/api/patents/search?q=${encodeURIComponent(industry.query)}&limit=8`, {
+    setErr(null);
+    fetch(`${BACKEND}/api/patents/feed?industry=${encodeURIComponent(industry.id)}&limit=10`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then(r => r.json())
-      .then(d => {
-        setPatents(Array.isArray(d) ? d : []);
-        setLoaded(true); setLoading(false);
+      .then(async r => {
+        const d = await r.json();
+        if (!r.ok || d.error) {
+          const msg = d.error || `HTTP ${r.status}`;
+          const type = (r.status === 401 || d.code === "AUTH_FAILED")    ? "auth"
+                     : (r.status === 429 || d.code === "QUOTA_EXCEEDED") ? "quota"
+                     : "error";
+          setErr({ type, message: msg });
+          setLoading(false);
+          return;
+        }
+        setPatents(Array.isArray(d.docs) ? d.docs : []);
+        setLoaded(true);
+        setLoading(false);
       })
-      .catch(e => { setErr(e.message); setLoading(false); });
-  }, [loaded, loading, industry.query, token]);
+      .catch(e => {
+        setErr({ type: "error", message: e.message });
+        setLoading(false);
+      });
+  }, [loaded, loading, industry.id, token]);
 
-  // IntersectionObserver — load when section scrolls into view
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const obs = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) { load(); obs.disconnect(); }
-    }, { threshold: 0.1 });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [load]);
+  function handleToggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !loaded && !loading) load();
+  }
+
+  function ErrorBanner() {
+    if (!err) return null;
+    const msg =
+      err.type === "auth"  ? `EPO OPS auth error — ${err.message}` :
+      err.type === "quota" ? "EPO OPS rate limit reached — try again in a few minutes." :
+      `Error: ${err.message}`;
+    return (
+      <div className="bg-[var(--card)] border border-red-500/30 rounded-2xl p-3">
+        <p className="text-red-400 text-xs font-semibold">⚠ {msg}</p>
+        <button
+          onClick={() => { setErr(null); setLoaded(false); load(); }}
+          className="text-violet-400 text-[10px] mt-1 hover:underline"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div ref={ref} className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-[var(--text)] font-black text-sm">{industry.label}</p>
-          <div className="h-0.5 w-5 bg-violet-500 rounded-full mt-0.5" />
+    <div className="space-y-2">
+      {/* Clickable header — the ONLY trigger for loading */}
+      <button
+        onClick={handleToggle}
+        className="w-full flex items-center justify-between group py-1"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[var(--text)] font-black text-sm group-hover:text-violet-400 transition-colors">
+            {industry.label}
+          </span>
+          <div className="h-0.5 w-5 bg-violet-500 rounded-full" />
         </div>
-        {!loaded && !loading && (
-          <button onClick={load} className="text-violet-400 text-xs border border-violet-500/25 rounded-xl px-3 py-1 bg-violet-500/8">
-            Load
-          </button>
-        )}
-      </div>
-
-      {loading && (
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {[1,2,3].map(i => (
-            <div key={i} className="flex-shrink-0 w-52 h-28 bg-[var(--card)] border border-[var(--border)] rounded-2xl animate-pulse" />
-          ))}
+        <div className="flex items-center gap-2">
+          {loaded && <span className="text-[var(--muted)] text-[10px]">{patents.length} filings</span>}
+          <span
+            className="text-[var(--muted)] text-xs transition-transform duration-200"
+            style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}
+          >
+            ›
+          </span>
         </div>
-      )}
+      </button>
 
-      {err && (
-        <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-3">
-          <p className="text-red-400 text-xs">Could not load patents — {err.includes("OPS") ? "EPO OPS credentials not configured." : err}</p>
-        </div>
-      )}
+      {open && (
+        <div className="space-y-2 pb-1">
+          {loading && (
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="flex-shrink-0 w-52 h-28 bg-[var(--card)] border border-[var(--border)] rounded-2xl animate-pulse" />
+              ))}
+            </div>
+          )}
 
-      {loaded && patents.length === 0 && (
-        <p className="text-[var(--muted)] text-xs px-1">No recent filings found.</p>
-      )}
+          <ErrorBanner />
 
-      {patents.length > 0 && (
-        <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: "none" }}>
-          {patents.map((p, i) => (
-            <FCard
-              key={i}
-              onClick={() => onSelect(p, industry.id)}
-              className="flex-shrink-0 w-56 space-y-1.5"
-            >
-              <p className="text-[var(--muted)] text-[10px] font-mono">{p.date || "—"}</p>
-              <p className="text-violet-400 text-[11px] font-bold truncate">{p.assignee}</p>
-              <p className="text-[var(--text)] text-xs font-semibold leading-tight line-clamp-2">{p.title}</p>
-              <p className="text-[var(--muted)] text-[10px] leading-relaxed line-clamp-2">
-                {firstSentence(p.abstract)}
-              </p>
-            </FCard>
-          ))}
+          {loaded && patents.length === 0 && !err && (
+            <p className="text-[var(--muted)] text-xs px-1">No recent filings found in the last 90 days.</p>
+          )}
+
+          {patents.length > 0 && (
+            <div className="flex gap-3 overflow-x-auto pb-2" style={{ scrollbarWidth: "none" }}>
+              {patents.map((p, i) => (
+                <FCard
+                  key={i}
+                  onClick={() => onSelect(p, industry.id)}
+                  className="flex-shrink-0 w-56 space-y-1.5"
+                >
+                  <p className="text-[var(--muted)] text-[10px] font-mono">{p.date || "—"}</p>
+                  <p className="text-violet-400 text-[11px] font-bold truncate">{p.assignee}</p>
+                  <p className="text-[var(--text)] text-xs font-semibold leading-tight line-clamp-2">{p.title}</p>
+                  <p className="text-[var(--muted)] text-[10px] leading-relaxed line-clamp-2">
+                    {firstSentence(p.abstract)}
+                  </p>
+                </FCard>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -315,12 +347,11 @@ function IndustrySection({ industry, token, onSelect }) {
 
 // ─── Feed ────────────────────────────────────────────────────────
 export default function Feed({ token, onSandboxLoad }) {
-  const [selected, setSelected] = useState(null);      // { patent, industry }
-  const [recentlyViewed, setRecentlyViewed] = useState([]); // for Sandbox picker
+  const [selected, setSelected]             = useState(null);
+  const [recentlyViewed, setRecentlyViewed] = useState([]);
 
   function handleSelect(patent, industryId) {
     setSelected({ patent, industry: industryId });
-    // Track recently viewed for Sandbox
     setRecentlyViewed(prev => {
       const next = [{ ...patent, industry: industryId }, ...prev.filter(p => p.number !== patent.number)];
       return next.slice(0, 10);
@@ -328,10 +359,10 @@ export default function Feed({ token, onSandboxLoad }) {
   }
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
+    <div className="space-y-1">
+      <div className="flex items-center justify-between mb-4">
         <p className="text-[var(--muted)] text-xs">
-          Recent filings by industry · click any card to read · EPO/OPS data
+          IPC classification · 90-day window · click a section to load
         </p>
         {recentlyViewed.length > 0 && (
           <button
@@ -343,14 +374,13 @@ export default function Feed({ token, onSandboxLoad }) {
         )}
       </div>
 
-      {INDUSTRIES.map(ind => (
-        <IndustrySection
-          key={ind.id}
-          industry={ind}
-          token={token}
-          onSelect={handleSelect}
-        />
-      ))}
+      <div className="divide-y divide-[var(--border)]">
+        {INDUSTRIES.map(ind => (
+          <div key={ind.id} className="py-3">
+            <IndustrySection industry={ind} token={token} onSelect={handleSelect} />
+          </div>
+        ))}
+      </div>
 
       {selected && (
         <PatentReader
