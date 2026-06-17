@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import ResearchConsole from "./ResearchConsole.jsx";
 import TheEye from "./TheEye.jsx";
 import PatentInfo from "./PatentInfo.jsx";
+import Predictions from "./Predictions.jsx";
 
 // ─── BACKEND ───────────────────────────────────────────────────
 // Where the data server lives. Locally it's localhost:3001.
@@ -13,7 +14,7 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 // Passwords/codes now live on the BACKEND (env vars), not here.
 // Login is verified server-side via POST /api/login.
 // Tabs only the owner sees. Guests with the code never see these.
-const OWNER_ONLY = ["dashboard", "portfolio", "analytics", "research", "tasks", "calendar", "eye", "patents-info"];
+const OWNER_ONLY = ["dashboard", "portfolio", "analytics", "research", "tasks", "calendar", "eye", "patents-info", "predictions"];
 
 // ─── PORTFOLIO ─────────────────────────────────────────────────
 // Intentionally EMPTY in the frontend. Your real holdings live on the
@@ -48,7 +49,8 @@ const TABS = [
   { id: "screener",   label: "Screener",        icon: "⊞"  },
   { id: "capitol",    label: "Capitol Trades",  icon: "⬟"  },
   { id: "earnings",   label: "Earnings",        icon: "⊡"  },
-  { id: "research",   label: "Research",        icon: "⊟"  },
+  { id: "research",     label: "Research",        icon: "⊟"  },
+  { id: "predictions",  label: "Predictions",     icon: "◎"  },
   { id: "eye",          label: "The Eye",         icon: "◉"  },
   { id: "patents-info", label: "Patent-Info",   icon: "⊞"  },
   { id: "network",      label: "Network",       icon: "◉"  },
@@ -1742,8 +1744,9 @@ const VIEWS = {
   screener: ScreenerView,
   capitol: CapitolView,
   earnings: EarningsView,
-  research: ResearchConsole,
-  eye: TheEye,
+  research:    ResearchConsole,
+  predictions: Predictions,
+  eye:         TheEye,
   "patents-info": PatentInfo,
   network: NetworkView,
   tasks: TasksView,
