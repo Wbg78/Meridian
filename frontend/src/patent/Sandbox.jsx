@@ -129,6 +129,34 @@ function buildAssembly(components) {
   return meshes;
 }
 
+// ─── Boss William avatar (image with graceful fallback) ─────────
+// Drop an image at frontend/public/boss-william.png to use a custom portrait.
+function BossAvatar({ size = 36 }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <div style={{
+        width: size, height: size, borderRadius: "50%",
+        background: "linear-gradient(135deg, #7c3aed, #0891b2)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontWeight: 900, color: "#fff", fontSize: size * 0.4, flexShrink: 0,
+      }}>W</div>
+    );
+  }
+  return (
+    <img
+      src="/boss-william.png"
+      alt="Boss William"
+      onError={() => setFailed(true)}
+      style={{
+        width: size, height: size, borderRadius: "50%", objectFit: "cover",
+        flexShrink: 0, border: "2px solid rgba(124,58,237,0.4)",
+        background: "#0a0a0f",
+      }}
+    />
+  );
+}
+
 // ─── Boss William panel ──────────────────────────────────────────
 function BossWilliam({ part, patentEvent, token, loading, explanation, onAsk }) {
   const isNoKey = explanation?.includes("ANTHROPIC_API_KEY not set");
@@ -140,7 +168,7 @@ function BossWilliam({ part, patentEvent, token, loading, explanation, onAsk }) 
     }}>
       {/* Header */}
       <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ width: 32, height: 32, borderRadius: "50%", background: "linear-gradient(135deg, #7c3aed, #0891b2)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: 13, flexShrink: 0 }}>W</div>
+        <BossAvatar size={36} />
         <div>
           <p style={{ fontWeight: 800, fontSize: 12, color: "var(--text)", lineHeight: 1.2 }}>Boss William</p>
           <p style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1 }}>Engineering mentor</p>
@@ -151,7 +179,8 @@ function BossWilliam({ part, patentEvent, token, loading, explanation, onAsk }) 
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Intro */}
         {patentEvent && !part && (
-          <div style={{ background: "rgba(124,58,237,0.08)", border: "1px solid rgba(124,58,237,0.2)", borderRadius: 10, padding: "10px 12px" }}>
+          <div style={{ background: "rgba(124,58,237,0.08)", border: "1px solid rgba(124,58,237,0.2)", borderRadius: 10, padding: "12px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8, textAlign: "center" }}>
+            <BossAvatar size={64} />
             <p style={{ fontSize: 11, color: "var(--text)", lineHeight: 1.6 }}>
               Alright, here's <strong>{patentEvent.title}</strong>. Click any part and I'll walk you through what it does and why it matters!
             </p>
@@ -159,9 +188,12 @@ function BossWilliam({ part, patentEvent, token, loading, explanation, onAsk }) 
         )}
 
         {!patentEvent && (
-          <p style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
-            Load a patent from the Feed (or enter a number below) and I'll guide you through the 3D schematic — click any part to learn about it.
-          </p>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, textAlign: "center", paddingTop: 8 }}>
+            <BossAvatar size={64} />
+            <p style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
+              Load a patent from the Feed (or enter a number below) and I'll guide you through the 3D schematic — click any part to learn about it.
+            </p>
+          </div>
         )}
 
         {/* Selected part display */}
@@ -272,6 +304,7 @@ function Toolbar({ mode, setMode, wireframe, setWireframe, exploded, setExploded
 
 // ─── Main Sandbox ────────────────────────────────────────────────
 export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
+  const containerRef      = useRef(null);
   const canvasRef         = useRef(null);
   const rendererRef       = useRef(null);
   const sceneRef          = useRef(null);
@@ -295,6 +328,20 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
   const [bwPart, setBwPart]           = useState(null);
   const [bwLoading, setBwLoading]     = useState(false);
   const [bwExplanation, setBwExplanation] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // ── Fullscreen toggle ────────────────────────────────────────
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (!document.fullscreenElement) el.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  }, []);
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
 
   // ── Init Three.js scene ──────────────────────────────────────
   useEffect(() => {
@@ -366,6 +413,9 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
       renderer.setSize(w, h, false);
     }
     window.addEventListener("resize", onResize);
+    // ResizeObserver keeps the canvas correct on fullscreen / layout changes
+    const ro = new ResizeObserver(() => onResize());
+    ro.observe(canvas);
     onResize();
 
     // Animation loop
@@ -379,6 +429,7 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
     return () => {
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener("resize", onResize);
+      ro.disconnect();
       orbit.dispose();
       transform.dispose();
       renderer.dispose();
@@ -586,7 +637,16 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
   const hasAssembly = meshesRef.current.length > 0;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 200px)", minHeight: 480, borderRadius: 16, overflow: "hidden", border: "1px solid var(--border)" }}>
+    <div
+      ref={containerRef}
+      style={{
+        display: "flex", flexDirection: "column",
+        height: isFullscreen ? "100vh" : "calc(100vh - 200px)",
+        minHeight: 480, borderRadius: isFullscreen ? 0 : 16,
+        overflow: "hidden", border: "1px solid var(--border)",
+        background: "var(--bg)",
+      }}
+    >
       {/* Patent Loader */}
       <div style={{ padding: "10px 14px", background: "var(--card)", borderBottom: "1px solid var(--border)", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, flexShrink: 0 }}>Load patent:</span>
@@ -650,6 +710,17 @@ export default function Sandbox({ token, initialPatent, recentlyViewed = [] }) {
             onClick={onCanvasClick}
             style={{ width: "100%", height: "100%", display: "block" }}
           />
+          {/* Fullscreen toggle */}
+          <button
+            onClick={toggleFullscreen}
+            title={isFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+            style={{
+              position: "absolute", top: 10, right: 10,
+              background: "rgba(10,10,15,0.8)", border: "1px solid rgba(124,58,237,0.35)",
+              color: "#a78bfa", borderRadius: 8, padding: "6px 10px",
+              fontSize: 12, fontWeight: 700, cursor: "pointer", lineHeight: 1,
+            }}
+          >{isFullscreen ? "⤢ Exit" : "⤢ Fullscreen"}</button>
           {/* Hint overlay */}
           {hasAssembly && (
             <div style={{

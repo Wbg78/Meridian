@@ -288,17 +288,68 @@ function recentDateWindow(days = 90) {
 // ─── ROUTES ─────────────────────────────────────────────────────
 
 // Diagnostic handler — exported so server.js can mount it WITHOUT requireOwner.
-// GET /api/patents/health → { ok, message } or { ok, error }
+// GET /api/patents/health            → { ok, message }
+// GET /api/patents/health?cql=<CQL>  → runs an arbitrary CQL and reports
+//   total + the country codes of the first rows, so OPS query syntax can be
+//   verified empirically (esp. country filtering). Read-only; small quota cost.
 export async function patentsHealthHandler(req, res) {
   if (!OPS_KEY || !OPS_SECRET) {
     return res.json({ ok: false, error: "EPO_OPS_KEY/EPO_OPS_SECRET not set in environment" });
   }
   try {
     await getOpsToken();
+    const cql = req.query.cql;
+    if (cql) {
+      try {
+        const { total, docs } = await opsSearch(String(cql), "1-10");
+        return res.json({
+          ok: true, cql, total,
+          countries: docs.map(d => d.country),
+          sample: docs.slice(0, 3).map(d => ({ number: d.number, title: d.title })),
+        });
+      } catch (e) {
+        return res.json({ ok: true, authOk: true, cql, searchError: String(e.message) });
+      }
+    }
     res.json({ ok: true, message: "OPS auth OK — token acquired successfully" });
   } catch (e) {
     res.json({ ok: false, error: String(e.message) });
   }
+}
+
+// ─── Translate CJK patent titles/abstracts to English (Haiku, batched) ──
+// One model call per feed page (only the rows actually shown), cached with
+// the feed. Degrades to originals if no key or on any failure.
+const CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/;
+async function translateDocsToEnglish(docs) {
+  if (!CLAUDE_KEY) return docs;
+  const need = docs.filter(d => CJK_RE.test(d.title || "") || CJK_RE.test(d.abstract || ""));
+  if (!need.length) return docs;
+  const items = need.map((d, i) => ({ i, title: d.title || "", abstract: (d.abstract || "").slice(0, 600) }));
+  const prompt = `Translate each patent's "title" and "abstract" into clear, natural English. If a field is already English, return it unchanged. Respond with ONLY a JSON array of objects {"i","title","abstract"} keyed by the same "i" indices.\n\n${JSON.stringify(items)}`;
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 2200, messages: [{ role: "user", content: prompt }] }),
+    });
+    const data = await r.json();
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+    const first = text.indexOf("["), last = text.lastIndexOf("]");
+    if (first < 0 || last < 0) return docs;
+    const arr = JSON.parse(text.slice(first, last + 1));
+    const byI = new Map(arr.map(o => [o.i, o]));
+    need.forEach((d, k) => {
+      const t = byI.get(k);
+      if (t) {
+        d.originalTitle = d.title;
+        d.title = t.title || d.title;
+        d.abstract = t.abstract || d.abstract;
+        d.translated = true;
+      }
+    });
+    return docs;
+  } catch { return docs; }
 }
 
 // GET /api/patents/feed?industry=semiconductors&region=us_eu&days=90&limit=12
@@ -326,9 +377,10 @@ patentsRouter.get("/feed", async (req, res) => {
     const cql = `${ipcFilter} and pd within "${window}"`;
     // Fetch a larger pool, then filter by country region-side so "US only"
     // doesn't get drowned out by high-volume CN filings.
-    const { docs: pool } = await opsSearch(cql, "1-50");
+    const { docs: pool } = await opsSearch(cql, "1-100");
     const filtered = allowed ? pool.filter(d => allowed.includes(d.country)) : pool;
-    const docs = filtered.slice(0, n);
+    const sliced = filtered.slice(0, n);
+    const docs = await translateDocsToEnglish(sliced);  // always show English
     const data = {
       industry, region, days: windowDays,
       docs, poolSize: pool.length,
