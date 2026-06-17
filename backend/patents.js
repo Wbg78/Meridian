@@ -61,6 +61,8 @@ async function opsSearch(cql, range = "1-10") {
   const url = `${OPS_BASE}/published-data/search/biblio?q=${encodeURIComponent(cql)}&Range=${range}`;
   const r = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
   const rawTxt = await r.text();
+  // OPS returns 404 when a query matches zero records — treat as empty, not an error.
+  if (r.status === 404) return { total: 0, docs: [] };
   if (!r.ok) throw new Error(`OPS search ${r.status}: ${rawTxt.slice(0, 160)}`);
   let raw;
   try { raw = JSON.parse(rawTxt); } catch { throw new Error("OPS returned non-JSON"); }
@@ -251,32 +253,37 @@ async function fetchIndustryLandscape(technology) {
 // ─── FEED — industry feed (IPC classification + 90-day window) ──
 const FEED_TTL = 6 * 3600_000;  // 6 h — recent filings change daily
 
-// IPC classification codes per industry section.
-// IPC field in OPS CQL is `ic`. Parentheses required for OR expressions.
-// Only 4-character IPC subclass codes are used — these parse reliably in OPS CQL.
-const INDUSTRY_IPC = {
-  semiconductors: `ic="H01L"`,
-  aerospace:      `(ic="B64C" or ic="B64D" or ic="B64G" or ic="F42B")`,
-  ai_ml:          `ic="G06N"`,
-  energy:         `(ic="H02J" or ic="H02S" or ic="H01M" or ic="F03D")`,
-  biotech:        `(ic="A61K" or ic="C12N" or ic="A61P")`,
-  robotics:       `(ic="B25J" or ic="G05B" or ic="G05D")`,
-  // ── Added bundles ──
-  computing:      `(ic="H04W" or ic="H04L" or ic="H04B")`,            // 5G/6G, networking, cybersecurity
-  mobility:       `(ic="B60L" or ic="B60W" or ic="B64G")`,            // EV propulsion, autonomous, satellites
-  health_bio:     `(ic="A61B" or ic="A61M" or ic="C12Q")`,            // medical devices, drug delivery, diagnostics/genomics
-  adv_mfg:        `(ic="B33Y" or ic="B82Y" or ic="G02B" or ic="H01S")`, // 3D printing, nanotech, photonics, lasers
+// Per-industry keyword queries. We use the `txt` CQL field (full-text) because
+// the IPC field (`ic`/`ipc`) returns SERVER.DomainAccess on this OPS tier, and
+// `txt` naturally ranks US/EP filings first (verified empirically via /health?cql=).
+const INDUSTRY_QUERIES = {
+  semiconductors: "semiconductor",
+  aerospace:      "aerospace propulsion",
+  ai_ml:          "neural network",
+  energy:         "power grid",
+  biotech:        "drug delivery",
+  robotics:       "robot manipulator",
+  computing:      "wireless network",
+  mobility:       "electric vehicle battery",
+  health_bio:     "medical device",
+  adv_mfg:        "additive manufacturing",
 };
 
-// Region → set of publication-country codes used to filter the result pool.
-// null = no filter (global).
-const EU_COUNTRIES = ["EP", "DE", "FR", "GB", "NL", "CH", "SE", "IT", "ES", "FI", "DK", "NO", "AT", "BE", "IE", "PL"];
-const REGION_COUNTRIES = {
+// Region → publication-country codes. Built into the CQL as `(pn=US or pn=EP …)`
+// which IS a valid OPS country constraint (verified). null = global (no clause).
+// EP (European Patent Office) covers most European filings, so a short list suffices.
+const REGION_PN = {
   us:         ["US"],
-  us_eu:      ["US", ...EU_COUNTRIES],
-  us_eu_jpkr: ["US", ...EU_COUNTRIES, "JP", "KR"],
+  us_eu:      ["US", "EP", "DE", "FR", "GB"],
+  us_eu_jpkr: ["US", "EP", "DE", "FR", "GB", "JP", "KR"],
   global:     null,
 };
+
+function regionClause(region) {
+  const cc = REGION_PN[region] !== undefined ? REGION_PN[region] : REGION_PN.us_eu;
+  if (!cc) return null;
+  return "(" + cc.map(c => `pn=${c}`).join(" or ") + ")";
+}
 
 function recentDateWindow(days = 90) {
   const end = new Date();
@@ -358,13 +365,12 @@ async function translateDocsToEnglish(docs) {
 patentsRouter.get("/feed", async (req, res) => {
   const { industry, limit, region = "us_eu", days } = req.query;
   if (!industry) return res.status(400).json({ error: "need ?industry=semiconductors" });
-  const ipcFilter = INDUSTRY_IPC[industry];
-  if (!ipcFilter) {
+  const query = INDUSTRY_QUERIES[industry];
+  if (!query) {
     return res.status(400).json({
-      error: `Unknown industry "${industry}". Valid: ${Object.keys(INDUSTRY_IPC).join(", ")}`,
+      error: `Unknown industry "${industry}". Valid: ${Object.keys(INDUSTRY_QUERIES).join(", ")}`,
     });
   }
-  const allowed = region in REGION_COUNTRIES ? REGION_COUNTRIES[region] : REGION_COUNTRIES.us_eu;
   const windowDays = Math.min(Math.max(+days || 90, 7), 365);
   const n = Math.min(+limit || 12, 25);
 
@@ -373,19 +379,18 @@ patentsRouter.get("/feed", async (req, res) => {
   if (hit && Date.now() - hit.at < FEED_TTL) return res.json(hit.data);
 
   try {
+    // Proven recipe: txt keyword + (pn=COUNTRY …) region + pd within date window.
+    // Country is constrained IN the query, so no post-filter / no large pool needed.
     const window = recentDateWindow(windowDays);
-    const cql = `${ipcFilter} and pd within "${window}"`;
-    // Fetch a larger pool, then filter by country region-side so "US only"
-    // doesn't get drowned out by high-volume CN filings.
-    const { docs: pool } = await opsSearch(cql, "1-100");
-    const filtered = allowed ? pool.filter(d => allowed.includes(d.country)) : pool;
-    const sliced = filtered.slice(0, n);
-    const docs = await translateDocsToEnglish(sliced);  // always show English
-    const data = {
-      industry, region, days: windowDays,
-      docs, poolSize: pool.length,
-      fetchedAt: new Date().toISOString(),
-    };
+    const parts = [`txt="${query}"`];
+    const rc = regionClause(region);
+    if (rc) parts.push(rc);
+    parts.push(`pd within "${window}"`);
+    const cql = parts.join(" and ");
+
+    const { docs: raw } = await opsSearch(cql, `1-${n}`);  // OPS returns empty (404→[]) if none
+    const docs = await translateDocsToEnglish(raw);        // always show English
+    const data = { industry, region, days: windowDays, query, docs, fetchedAt: new Date().toISOString() };
     CACHE.set(cacheKey, { at: Date.now(), data });
     res.json(data);
   } catch (e) {
