@@ -270,9 +270,9 @@ function recentDateWindow(days = 90) {
 
 // ─── ROUTES ─────────────────────────────────────────────────────
 
-// Diagnostic: GET /api/patents/health
-// Tests OPS token fetch in isolation so auth can be confirmed before the feed.
-patentsRouter.get("/health", async (req, res) => {
+// Diagnostic handler — exported so server.js can mount it WITHOUT requireOwner.
+// GET /api/patents/health → { ok, message } or { ok, error }
+export async function patentsHealthHandler(req, res) {
   if (!OPS_KEY || !OPS_SECRET) {
     return res.json({ ok: false, error: "EPO_OPS_KEY/EPO_OPS_SECRET not set in environment" });
   }
@@ -282,7 +282,7 @@ patentsRouter.get("/health", async (req, res) => {
   } catch (e) {
     res.json({ ok: false, error: String(e.message) });
   }
-});
+}
 
 // GET /api/patents/feed?industry=semiconductors&limit=10
 // Returns { industry, docs[], fetchedAt } or { error, code }

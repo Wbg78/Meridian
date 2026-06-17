@@ -22,7 +22,7 @@ import { researchRouter } from "./research.js";
 import { resolveOutcomes } from "./signals-tracker.js";
 import { spaceRouter } from "./space.js";
 import { satelliteRouter } from "./satellite.js";
-import { patentsRouter } from "./patents.js";
+import { patentsRouter, patentsHealthHandler } from "./patents.js";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "./watchlist.js";
 import { runMotor } from "./motor.js";
 import { getQuantMetrics } from "./quant.js";
@@ -126,6 +126,7 @@ app.use("/api/research", requireOwner, researchRouter);
 // --- The Eye: space, satellite & patent intelligence (owner-only) ---
 app.use("/api/space",     requireOwner, spaceRouter);
 app.use("/api/satellite", requireOwner, satelliteRouter);
+app.get("/api/patents/health", patentsHealthHandler); // public — no auth needed for diagnostics
 app.use("/api/patents",   requireOwner, patentsRouter);
 
 // --- Watchlist API (owner-only) ---
